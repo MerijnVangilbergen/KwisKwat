@@ -1,11 +1,22 @@
 import numpy as np
 import pandas as pd
-import tkinter as tk
 from collections import namedtuple
-from PIL import ImageTk, Image
-import time
+import copy
+
 import matplotlib.pyplot as plt
-# from matplotlib.patches import Rectangle
+import matplotlib.image as mpimg
+import matplotlib.transforms as transforms
+from matplotlib.backends.backend_agg import FigureCanvasAgg as FigureCanvas
+from PIL import Image
+import cv2
+
+import os
+import shutil
+
+import time
+
+# Select folders
+video_folder = '../videos'
 
 def vector2angle(vector,deg=False):
     complex_number = vector[0] + vector[1] *1j
@@ -204,6 +215,9 @@ class CIRCUIT:
                                        'angle_change': angle_change,
                                        'angle_final': angle_final})
         print('circuit data: \n ', self.data)
+
+        self.start = self.data.at[0,'destination'] - self.data.at[0,'length']/2 * self.data.at[0,'tangent']
+        self.finish = self.start
     def plot(self):
         # We construct a series of 2D points to be plotted
         all_points = np.empty((0,2))
@@ -218,11 +232,13 @@ class CIRCUIT:
         fig = plt.figure(figsize=fig_size)
         ax = fig.add_axes([0,0,1,1])
         ax.set_aspect('equal')
+        ax.set_xlim(-default_width,circuit_size[0]+default_width)
+        ax.set_ylim(-default_width,circuit_size[1]+default_width)
         ax.set_facecolor('green')
         ax.plot(all_points[:,0], all_points[:,1], 'r-', linewidth=fig.dpi*ipm*default_width*1.1)
         ax.plot(all_points[:,0], all_points[:,1], 'w--',linewidth=fig.dpi*ipm*default_width*1.1)
         ax.plot(all_points[:,0], all_points[:,1], color=(0.3, 0.3, 0.3), linestyle='-', linewidth=fig.dpi*ipm*default_width)
-        plt.show()
+        return fig,ax
 
 CAR = namedtuple("CAR", "acceleration brake grip tank")
 
@@ -230,7 +246,7 @@ class AGENT:
     def __init__(self):
         self.neural_network = 1
     def getAction(self,state):
-        acceleration = np.random.uniform(-1,1)
+        acceleration = np.random.uniform(-1,10)
         steering = np.random.uniform(-1,1)
         return acceleration, steering
 
@@ -239,117 +255,139 @@ class RACE:
         self.circuit = circuit
         self.agents = agents
         self.cars = cars
-        numOfSteps = 4
+    def simulate(self,save=False):
+        def draw_cars_and_save_frame():
+            # Copy the circuit figure
+            fig2 = copy.deepcopy(fig)
+            ax2 = fig2.get_axes()[0]
 
-        # Create a 3D dataframe for storage of results
-        A = np.array(['car'+str(driver_idx) for driver_idx in range(len(agents))])
-        B = np.array(['position','velocity','health','segment','reached_turning'])
-        C = numOfSteps*[len(A)* [np.zeros(2), np.zeros(2), 1, 0, False]]
-        self.data = pd.DataFrame(data=C, columns=pd.MultiIndex.from_tuples(zip(np.repeat(A, len(B)), np.tile(B, len(A)))))
-        print('race data: \n', self.data)
-    def simulate(self):
-        for tt in range(self.data.shape[0]-1):
+            # Draw the cars in the correct position ans orientation
+            for car in range(len(self.cars)):
+                p = global_state.at[car,'position']
+                T = global_state.at[car,'orientation']
+                transformation = transforms.Affine2D(matrix=[[T[0], -T[1], p[0]], [T[1], T[0], p[1]], [0, 0, 1]])
+                highest_zorder = max(artist.get_zorder() for artist in ax2.get_children())
+                ax2.imshow(img,
+                          extent = [-car_size[0], 0, -car_size[1]/2, car_size[1]/2],
+                          transform = transformation + ax2.transData,
+                          zorder = highest_zorder+1)
+        
+            # Draw the plot onto a canvas
+            canvas = FigureCanvas(fig2)
+            canvas.draw()
+
+            # Get the RGBA buffer from the canvas and convert to BGR
+            frame = np.array(canvas.renderer._renderer)
+            frame = cv2.cvtColor(frame, cv2.COLOR_RGBA2BGR)
+            
+            # Write the frame to the video
+            out.write(frame)
+        
+        def map_to_agent_state(global_state):
+            # Output: the agent state, stored as a numpy array. The elements represent the following:
+                # Car stats
+                # --- time left in the race
+                # position along the tangent wrt the destination (distance to next segment)
+                # position along the normal wrt the destination (deviation from the road center)
+                # velocity along the tangent wrt the destination
+                # velocity along the normal wrt the destination
+                # curvature of current segment
+                # curvature of next segment
+                # length of next segment
+                # --- orientation or drift
+                # --- difference in total elapsed distance wrt first car ahead
+                # --- normal coordinate of first car ahead
+                # --- difference in total elapsed distance wrt first car behind
+                # --- normal coordinate of first car behind
+
+            car=0 #MAKE THIS AN INPUT ARGUMENT
+            segment = global_state.at[car,'segment']
+            if global_state.at[car,'reached_turning']:
+                radial_position = global_state.at[car,'position'] - self.circuit.data.at[segment,'centers']
+                angle = vector2angle(radial_position)
+                radius = np.linalg(radial_position)
+                return np.concatenate(( self.cars[car], #car stats
+                                    [self.circuit.data.at[segment,'radius'] * (angle-self.circuit.data.at[segment,'angle_final']), #distance to next segment
+                                        (radius-self.circuit.data.at[segment,'radius']) * np.sign(self.circuit.data.at[segment,'curvature']), #deviation from the road center
+                                        #velocity
+                                        self.circuit.data.at[segment,'curvature'], #curvature of current segment
+                                        0 #curvature of next segment
+                                    ]
+                                        ))
+            else:
+                return np.concatenate(( self.cars[car], #car stats
+                                        (np.vstack([ global_state.at[car,'position']-self.circuit.data.at[segment,'destination'],
+                                                    global_state.at[car,'velocity'] ])
+                                        @ np.column_stack([self.circuit.data.at[segment,'tangent'], self.circuit.data.at[segment,'normal']])
+                                        ).reshape(-1), #position and velocity
+                                        [0, self.circuit.data.at[(segment+1)%self.circuit.data.shape[0],'curvature']] #curvature of current and next segment
+                                        ))
+        def step_simulator(global_state,actions):
+            for car in range(len(self.cars)):
+                acceleration = actions[car][0] * np.array([1,0])
+
+                global_state.at[car,'velocity'] = global_state.at[car,'velocity'] + dt * acceleration
+                global_state.at[car,'position'] = global_state.at[car,'position'] + dt/2 * (global_state.at[car,'velocity']+global_state.at[car,'velocity'])
+                return global_state
+        
+        # The global state is stored as a table where each row represents the state of a car. 
+        # Initialisation of the global state
+        global_state = pd.DataFrame(data={'position': [self.circuit.finish + ((cc+1)/(len(self.cars)+1) -.5) * default_width * self.circuit.data.at[0,'normal'] for cc in range(len(self.cars))],
+                                          'orientation': len(self.cars) * [self.circuit.data.at[0,'tangent']],
+                                          'velocity': len(self.cars) * [np.zeros(2)],
+                                          'health': len(self.cars) * [1],
+                                          'segment': len(self.cars) * [0],
+                                          'reached_turning': len(self.cars) * [False]})
+        # print('global_state: \n', global_state)
+
+        tt = 0
+        # Draw the circuit
+        if save:
+            fourcc = cv2.VideoWriter_fourcc(*'XVID')
+            out = cv2.VideoWriter(video_folder+'/output_video.avi', fourcc, fps=1/dt, frameSize=frameSize)
+            fig,ax = self.circuit.plot()
+            img = mpimg.imread('Car.png')
+            draw_cars_and_save_frame()
+
+        numOfSteps = 20
+        while tt <= numOfSteps:
             # Determine the inputs to the neural networks, i.e. what the agent sees.
-            agent_state = self.map_to_agent_state(tt)
+            agent_state = map_to_agent_state(global_state)
             # The agent determines which action to take
             actions = [agent.getAction(agent_state) for agent in self.agents]
             # Calculate the next state using Forward Euler (or any other integration scheme)
-            self.step_simulator(tt,actions)
-            print('race data: \n', self.data)
-    def map_to_agent_state(self,tt):
-        # Input: the global state at some instance of time (stored in self.data.iloc[tt])
-        # Output: the agent state, stored as a numpy array. The elements represent the following:
-            # Car stats
-            # --- time left in the race
-            # position along the tangent wrt the destination (distance to next segment)
-            # position along the normal wrt the destination (deviation from the road center)
-            # velocity along the tangent wrt the destination
-            # velocity along the normal wrt the destination
-            # curvature of current segment
-            # curvature of next segment
-            # length of next segment
-            # --- orientation or drift
-            # --- difference in total elapsed distance wrt first car ahead
-            # --- normal coordinate of first car ahead
-            # --- difference in total elapsed distance wrt first car behind
-            # --- normal coordinate of first car behind
+            global_state = step_simulator(global_state,actions)
+            # print('global_state: \n', global_state)
+            if save:
+                draw_cars_and_save_frame()
+            tt += 1
 
-        car=0 #MAKE THIS AN INPUT ARGUMENT
-        car_string = 'car'+str(car)
-        segment = self.data.at[tt,(car_string,'segment')]
-        if self.data.at[tt,(car_string,'reached_turning')]:
-            radial_position = self.data.at[tt,(car_string,'position')] - self.circuit.data.at[segment,'centers']
-            angle = vector2angle(radial_position)
-            radius = np.linalg(radial_position)
-            return np.concatenate(( self.cars[car], #car stats
-                                   [self.circuit.data.at[segment,'radius'] * (angle-self.circuit.data.at[segment,'angle_final']), #distance to next segment
-                                    (radius-self.circuit.data.at[segment,'radius']) * np.sign(self.circuit.data.at[segment,'curvature']), #deviation from the road center
-                                    #velocity
-                                    self.circuit.data.at[segment,'curvature'], #curvature of current segment
-                                    0 #curvature of next segment
-                                   ]
-                                    ))
-        else:
-            return np.concatenate(( self.cars[car], #car stats
-                                    (np.vstack([ self.data.at[tt,(car_string,'position')]-self.circuit.data.at[segment,'destination'],
-                                                 self.data.at[tt,(car_string,'velocity')] ])
-                                     @ np.column_stack([self.circuit.data.at[segment,'tangent'], self.circuit.data.at[segment,'normal']])
-                                    ).reshape(-1), #position and velocity
-                                    [0, self.circuit.data.at[(segment+1)%self.circuit.data.shape[0],'curvature']] #curvature of current and next segment
-                                    ))
-
-    def step_simulator(self,tt,actions):
-        # Input: the global state at some instance of time (stored in self.data.iloc[tt])
-        # Input: the action of each driver
-        # Output: the global state at the next instance of time (stored in self.data.iloc[tt+1])
-
-        # state = self.data.iloc[tt].copy(deep=True)
-        # state.loc['car0','velocity'] += np.array([2,0])
-
-        for car in range(len(self.agents)):
-            car_string = 'car'+str(car)
-
-            acceleration = actions[car][0] * np.array([1,0])
-
-            self.data.at[tt+1,(car_string,'velocity')] = self.data.at[tt,(car_string,'velocity')] + dt * acceleration
-            self.data.at[tt+1,(car_string,'position')] = self.data.at[tt,(car_string,'position')] + dt/2 * (self.data.at[tt,(car_string,'velocity')]+self.data.at[tt+1,(car_string,'velocity')])
-    def display(self):
-        self.circuit.plot()
-
-        # # Create an image for each car
-        # car_images = []
-        # for car in range(len(self.agents)):
-        #     car_images.append(Image.open("Car.png")) #CHANGE COLORS
-        #     photo_image = ImageTk.PhotoImage(car_image.rotate(90))
-        #     canvas.create_image(200,200,image=photo_image)
-        
-        # # Update positions for each time step
-        # for tt in range(np.shape(self.data)[0]):
-        #     start_time = time.time()
-        #     for car in range(len(self.agents)):
-        #         car_string = 'car'+str(car)
-        #         pos = self.data.at[tt,(car_string,'position')]
-        #     end_time = time.time()
-        # time.sleep(max(0,dt-(end_time-start_time)))
-
-        # window.mainloop()
+        if save:
+            out.release()
+            # shutil.rmtree(temp_folder)
 
 default_width = 12 #[meters]
-dt = 1
+dt = 1/8
 
+frameSize = (1280,720)
 # fig_size_pixels = (1920,1080) #[pixels]
 fig_size = (12.8,7.2) #[inches]
 circuit_width = 500 #[meters]
 ipm = fig_size[0]/circuit_width #inches per meter
 circuit_size = (circuit_width, fig_size[1] /ipm) #[meters]
-
+car_size = (5,2.5) #[meters]
 circuit = CIRCUIT(size=circuit_size,startlength=250,N=20)
-circuit.plot()
+# fig,ax = circuit.plot()
+# plt.show()
 
-# agent1 = AGENT()
-# agent2 = AGENT()
-# car1 = CAR(1,1,1,1)
-# car2 = CAR(1,1,1,1)
-# race = RACE(circuit,[agent1,agent2], [car1,car2])
-# race.simulate()
-# race.display()
+agent1 = AGENT()
+agent2 = AGENT()
+car1 = CAR(1,1,1,1)
+car2 = CAR(1,1,1,1)
+race = RACE(circuit,[agent1,agent2], [car1,car2])
+
+start = time.time()
+race.simulate(save=True)
+end = time.time()
+
+print('time: ', end-start)
