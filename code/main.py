@@ -11,7 +11,7 @@ import cv2
 import time
 
 # Select folders
-video_folder = '../videos'
+video_folder = './videos'
 
 
 def vector2angle(vector):
@@ -324,35 +324,33 @@ class RACE:
         self.cars = cars
     def simulate(self,save=False):
         def draw_cars_and_save_frame():
-            try:
-                # Copy the circuit figure
-                fig2 = copy.deepcopy(fig)
-                ax2 = fig2.get_axes()[0]
+            # Draw the cars in the correct position and orientation
+            car_images = []
+            zorder = max(artist.get_zorder() for artist in ax.get_children())
+            for car in range(len(self.cars)):
+                zorder += 1
+                p = position[[car],:].T # This is a 2*1 column array
+                TN = car_TN[car]        # This is a 2*2 array
+                transformation = transforms.Affine2D(matrix=np.block([[TN,p], [0,0,1]]))
+                car_images.append(ax.imshow(img,
+                                            extent = [-car_size[0]/2, car_size[0]/2, -car_size[1]/2, car_size[1]/2],
+                                            transform = transformation + ax.transData,
+                                            zorder = zorder))
+        
+            # Draw the plot onto a canvas
+            canvas = FigureCanvas(fig)
+            canvas.draw()
 
-                # Draw the cars in the correct position ans orientation
-                zorder = max(artist.get_zorder() for artist in ax2.get_children())
-                for car in range(len(self.cars)):
-                    zorder += 1
-                    p = position[[car],:].T # This is a 2*1 column array
-                    TN = car_TN[car]        # This is a 2*2 array
-                    transformation = transforms.Affine2D(matrix=np.block([[TN,p], [0,0,1]]))
-                    ax2.imshow(img,
-                            extent = [-car_size[0]/2, car_size[0]/2, -car_size[1]/2, car_size[1]/2],
-                            transform = transformation + ax2.transData,
-                            zorder = zorder)
+            # Remove car_images for next iteration
+            for image in car_images:
+                image.remove()
+
+            # Get the RGBA buffer from the canvas and convert to BGR
+            frame = np.array(canvas.renderer._renderer)
+            frame = cv2.cvtColor(frame, cv2.COLOR_RGBA2BGR)
             
-                # Draw the plot onto a canvas
-                canvas = FigureCanvas(fig2)
-                canvas.draw()
-
-                # Get the RGBA buffer from the canvas and convert to BGR
-                frame = np.array(canvas.renderer._renderer)
-                frame = cv2.cvtColor(frame, cv2.COLOR_RGBA2BGR)
-                
-                # Write the frame to the video
-                out.write(frame)
-            except:
-                print('Frame skipped due to error')
+            # Write the frame to the video
+            out.write(frame)
         
         # def map_to_agent_state(global_state):
         #     # Output: the agent state, stored as a numpy array. The elements represent the following:
@@ -417,7 +415,7 @@ class RACE:
 
         # Draw the circuit
         if save:
-            fourcc = cv2.VideoWriter_fourcc(*'XVID')
+            fourcc = cv2.VideoWriter_fourcc(*'MP4V')
             out = cv2.VideoWriter(video_folder+'/output_video.avi', fourcc, fps=1/dt, frameSize=frameSize)
             fig,ax = self.circuit.plot()
             img = mpimg.imread('./Car.png')
