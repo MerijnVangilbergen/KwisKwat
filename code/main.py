@@ -420,7 +420,7 @@ class RACE:
             fourcc = cv2.VideoWriter_fourcc(*'XVID')
             out = cv2.VideoWriter(video_folder+'/output_video.avi', fourcc, fps=1/dt, frameSize=frameSize)
             fig,ax = self.circuit.plot()
-            img = mpimg.imread('Car.png')
+            img = mpimg.imread('./Car.png')
             draw_cars_and_save_frame()
 
         ### Simulation ###

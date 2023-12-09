@@ -1,0 +1,5 @@
+- Fix spread_out
+- Improve resolution or zoom in
+- Change grip on grass
+- Create inputs to neural network
+- Create neural networks
