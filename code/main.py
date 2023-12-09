@@ -32,20 +32,39 @@ def angle_minus(a,b):
     return diff
 
 def rotate90left(vector):
-    # Both input and output are numpy arrays of size 2.
-    return np.array([-vector[1], vector[0]])
+    if vector.ndim == 1:
+        # Both input and output vector have length 2.
+        return np.array([-vector[1], vector[0]])
+    else:
+        # Both input and output vector shape (Nwheels,2).
+        return np.column_stack([-vector[:,1], vector[:,0]])
 
 def to_frame(vector,frame_TN):
     # The input vector is expressed in the global frame.
-    # frame_TN is a 2D-array of size 2x2. Its columns represent the tangent and the normal of the alternative frame with respect to the global frame.
-    # The output represents the same vector as the input, but is expressed in the alternative frame.
-    return np.transpose(frame_TN) @ vector
-
+    # The output vector is expressed in an alternative frame with frame_TN as [Tangent,Normal]-pair with respect to the global frame.
+    if vector.ndim == 1:
+        # frame_TN is a 2D-array of size 2x2. Its columns represent the tangent and the normal of the alternative frame with respect to the global frame.
+        # The output represents the same vector as the input, but is expressed in the alternative frame.
+        return np.transpose(frame_TN) @ vector
+    elif vector.ndim == 2:
+        # vector has shape (Ncars,2)
+        # frameTN has shape (Ncars,2,2)
+        return np.matmul(np.transpose(frame_TN,[0,2,1]), vector[:,:,np.newaxis]).squeeze() # shape (Ncars,2)
+    else:
+        # vector has shape (Ncars,Nwheels,2)
+        # frameTN has shape (Ncars,Nweels,2,2)
+        return np.matmul(np.transpose(frame_TN,[0,1,3,2]), vector[:,:,:,np.newaxis]).squeeze() # shape (Ncars,Nwheels,2)
+    
 def from_frame(vector,frame_TN):
     # The input vector is expressed in an alternative frame.
-    # frame_TN is a 2D-array of size 2x2. Its columns represent the tangent and the normal of the alternative frame with respect to the global frame.
     # The output represents the same vector as the input, but is expressed in the global frame.
-    return frame_TN @ vector
+    if vector.ndim == 1:
+        # frame_TN is a 2D-array of size 2x2. Its columns represent the tangent and the normal of the alternative frame with respect to the global frame.
+        return frame_TN @ vector
+    else:
+        # vector has shape (Ncars,Nwheels,2)
+        # frameTN has shape (Ncars,Nweels,2,2)
+        return np.matmul(frame_TN, vector[:,:,:,np.newaxis]).squeeze() # shape (Ncars,Nwheels,2)
 
 class CIRCUIT:
     def __init__(self,size,startlength,N):
@@ -413,18 +432,17 @@ class RACE:
         reached_turning = np.repeat(False,len(self.cars))                   # shape Ncars
         position_local, velocity_local, TN_local = self.circuit.to_local(position,velocity,segment,reached_turning)
 
-        # Draw the circuit
         if save:
+            # Initialise video
             fourcc = cv2.VideoWriter_fourcc(*'MP4V')
-            out = cv2.VideoWriter(video_folder+'/output_video.avi', fourcc, fps=1/dt, frameSize=frameSize)
+            out = cv2.VideoWriter(video_folder+'/output_video.mp4', fourcc, fps=video_speedup/dt, frameSize=frameSize)
             fig,ax = self.circuit.plot()
             img = mpimg.imread('./Car.png')
             draw_cars_and_save_frame()
 
         ### Simulation ###
-        numOfSteps = 500
+        numOfSteps = 50
         for tt in range(numOfSteps):
-            
             # Determine the inputs to the neural networks, i.e. what the agent sees.
 
 
@@ -432,66 +450,108 @@ class RACE:
             actions = [agent.getAction() for agent in self.agents]
             # actions = getActions(states,agents)
 
-            ### Determine whether wheels are on road or grass ###
-            # car_TN_local = TN_local.transpose() @ car_TN
-            # car_Normal_local = TN_local.transpose() @ car_Normal
+            # Determine whether wheels are on road or grass
             car_Normal_local = np.matmul(np.transpose(TN_local,(0,2,1)), car_TN[:,:,1,np.newaxis]).squeeze() # shape (Ncars,2)
-            
-            # wheels_Npos_local = position_local[1] + np.dot(car_Normal_local, wheel_rvector)
+                # car_TN_local = TN_local.transpose() @ car_TN
+                # car_Normal_local = TN_local.transpose() @ car_Normal
             wheels_Npos_local = position_local[:,np.newaxis,1] + np.tensordot(car_Normal_local[:,np.newaxis,:], wheel_rvectors[np.newaxis,:,:], axes=(2,2)).squeeze() #shape (Ncars,Nwheels)
+                # wheels_Npos_local = position_local[1] + np.dot(car_Normal_local, wheel_rvector)
+            
             off_road = np.abs(wheels_Npos_local) > road_width/2 #shape (Ncars,Nwheels)
             mu = np.full(np.shape(off_road), mu_road) #shape (Ncars,Nwheels)
             roll_resistance_coef = np.full(np.shape(off_road), roll_resistance_coef_road) #shape (Ncars,Nwheels)
             mu[off_road] = mu_grass
             roll_resistance_coef[off_road] = roll_resistance_coef_grass
 
-            for car in range(len(self.cars)):
-                ### Derive the forces exerted by the road ###
-                # All vectors in this section are expressed in the car frame. I.e. (1,0) corresponds to the car tangent and (0,1) corresponds to the car normal.
-                def surface_force_per_mass(wheel_rvector,wheel_TN,mu,roll_resistance_coef):
-                    velocity_car_frame = to_frame(velocity[car,:], frame_TN=car_TN[car])
-                    wheel_velocity = velocity_car_frame + omega[car] * rotate90left(wheel_rvector)
-                    wheel_velocity_wheel_frame = to_frame(wheel_velocity, frame_TN=wheel_TN) #wheel_TN is expressed in the car frame, so this brings the vector from the car frame to the wheel frame.
-                    acc_tangent = acc_motor - np.sign(wheel_velocity_wheel_frame[1]) * roll_resistance_coef
-                    acc_normal = -wheel_velocity_wheel_frame[1] /dt #This centripital friction is required to prevent centrifugal drift
+            ### Derive the forces exerted by the road ###
+            acceleration = np.zeros(np.shape(velocity))
+            torque_per_mass = np.zeros(np.shape(omega))
+            # All vectors in this section are expressed in the car frame. I.e. (1,0) corresponds to the car tangent and (0,1) corresponds to the car normal.
+            acc_motor = np.array([actions[car][0] for car in range(len(self.cars))]) # shape Ncars #This is the wanted tangential acceleration
+            sintheta = np.array([actions[car][1] for car in range(len(self.cars))])  # shape Ncars #theta is the angle between the car tangent and the front wheel tangent
+            costheta = np.sqrt(1-sintheta**2)
+            wheel_TN = np.zeros((len(sintheta),4,2,2)) # shape (Ncars,Nwheels,2,2)
+            #front wheels
+            wheel_TN[:,[0,1],0,0] = costheta[:,np.newaxis]
+            wheel_TN[:,[0,1],0,1] = -sintheta[:,np.newaxis]
+            wheel_TN[:,[0,1],1,0] = sintheta[:,np.newaxis]
+            wheel_TN[:,[0,1],1,1] = costheta[:,np.newaxis]
+            #back wheels
+            wheel_TN[:,[2,3],0,0] = 1
+            wheel_TN[:,[2,3],0,1] = 0
+            wheel_TN[:,[2,3],1,0] = 0
+            wheel_TN[:,[2,3],1,1] = 1
 
-                    acc = np.array([acc_tangent,acc_normal])
-                    acc_norm = np.linalg.norm(acc)
-                    if acc_norm > mu*g:
-                        acc = mu*drift_multiplyer*g / acc_norm * acc
-                    return from_frame(acc, wheel_TN) #wheel_TN is expressed in the car frame, so this brings the vector from the wheel frame to the car frame.
+            velocity_car_frame = to_frame(velocity, frame_TN=car_TN) # shape (Ncars,2)
+            wheel_velocity = velocity_car_frame[:,np.newaxis,:] + omega[:,np.newaxis,np.newaxis] * rotate90left(wheel_rvectors)[np.newaxis,:,:] # shape (Ncars,Nwheels,2)
+            wheel_velocity_wheel_frame = to_frame(wheel_velocity, frame_TN=wheel_TN) # shape (Ncars,Nwheels,2)
+                #wheel_TN is expressed in the car frame, so this brings the vector from the car frame to the wheel frame.
+            acc_wheel_frame = np.zeros((np.shape(wheel_velocity_wheel_frame))) # shape (Ncars,Nwheels,2)
+            acc_wheel_frame[:,:,0] = acc_motor[:,np.newaxis] - np.sign(wheel_velocity_wheel_frame[:,:,0]) * roll_resistance_coef
+                # maximal acceleration along car tangent = acc_motor - sign(wheel speed along car tangent) * roll_resistance_coef
+            acc_wheel_frame[:,:,1] = -wheel_velocity_wheel_frame[:,:,1] /dt
+                # maximal acceleration along car normal = centripital friction required to prevent centrifugal drift
+                # speed - dt*acceleration = 0, so maximal acceleration along car normal = -(wheel speed along car normal) /dt
+            acc_norm = np.linalg.norm(acc_wheel_frame,axis=-1) # shape (Ncars,Nwheels)
+            acc_wheel_frame[acc_norm > mu*g, :] *= (mu[acc_norm > mu*g, np.newaxis]*(drift_multiplyer*g) / acc_norm[acc_norm > mu*g, np.newaxis]) 
+            acc_car_frame = np.matmul(wheel_TN, acc_wheel_frame[:,:,:,np.newaxis]).squeeze() # shape (Ncars,Nwheels,2)
+
+            # translational force
+            acceleration_surface_car_frame = np.mean(acc_car_frame, axis=1).squeeze() # shape (Ncars,2)
+                # We use mean and not sum. That is because we are working with acceleration and not force. If we would be working with force, we should've used mass/4 for each wheel.
+
+            # rotational force
+            torque_per_mass = wheel_rvectors[np.newaxis,:,0] * acc_car_frame[:,:,1] - wheel_rvectors[np.newaxis,:,1] * acc_car_frame[:,:,0]  # shape (Ncars,Nwheels)
+                # torque = r x F, so torque_z = r_x * F_y - r_y * F_x
+            torque_per_mass = np.mean(torque_per_mass, axis=1).squeeze() # shape (Ncars,2)
+                # We use mean and not sum. That is because we are working with acceleration and not force. If we would be working with force, we should've used mass/4 for each wheel.
+
+            ### Add air resistance ###
+            acceleration_surface = np.matmul(car_TN, acceleration_surface_car_frame[:,:,np.newaxis]).squeeze() # shape (Ncars,2)
+            acceleration = acceleration_surface - air_resistance_coef * np.linalg.norm(velocity,axis=1)[:,np.newaxis] * velocity # shape (Ncars,2)
+
+            # for car in range(len(self.cars)):
+            #     def surface_force_per_mass(wheel_rvector,wheel_TN,mu,roll_resistance_coef):
+            #         velocity_car_frame = to_frame(velocity[car,:], frame_TN=car_TN[car])
+            #         wheel_velocity = velocity_car_frame + omega[car] * rotate90left(wheel_rvector)
+            #         wheel_velocity_wheel_frame = to_frame(wheel_velocity, frame_TN=wheel_TN) #wheel_TN is expressed in the car frame, so this brings the vector from the car frame to the wheel frame.
+            #         acc_tangent = acc_motor[car] - np.sign(wheel_velocity_wheel_frame[0]) * roll_resistance_coef
+            #         acc_normal = -wheel_velocity_wheel_frame[1] /dt #This centripital friction is required to prevent centrifugal drift
+
+            #         acc = np.array([acc_tangent,acc_normal])
+            #         acc_norm = np.linalg.norm(acc)
+            #         if acc_norm > mu*g:
+            #             acc = mu*drift_multiplyer*g / acc_norm * acc
+            #         return from_frame(acc, wheel_TN) #wheel_TN is expressed in the car frame, so this brings the vector from the wheel frame to the car frame.
                 
-                acc_motor = actions[car][0] #This is the wanted tangential acceleration
-                sintheta = actions[car][1] #theta is the angle between the car tangent and the front wheel tangent
-                costheta = np.sqrt(1-sintheta**2)
-
-                wheel_force_FL = surface_force_per_mass(wheel_rvector=wheel_rvectors[0], wheel_TN=np.array([[costheta,-sintheta], [sintheta,costheta]]), mu=mu[car,0],roll_resistance_coef=roll_resistance_coef[car,0])
-                wheel_force_FR = surface_force_per_mass(wheel_rvector=wheel_rvectors[1], wheel_TN=np.array([[costheta,-sintheta], [sintheta,costheta]]), mu=mu[car,1],roll_resistance_coef=roll_resistance_coef[car,1])
-                wheel_force_BL = surface_force_per_mass(wheel_rvector=wheel_rvectors[2], wheel_TN=np.eye(2)                                            , mu=mu[car,2],roll_resistance_coef=roll_resistance_coef[car,2])
-                wheel_force_BR = surface_force_per_mass(wheel_rvector=wheel_rvectors[3], wheel_TN=np.eye(2)                                            , mu=mu[car,3],roll_resistance_coef=roll_resistance_coef[car,3])
+            #     wheel_force_FL = surface_force_per_mass(wheel_rvector=wheel_rvectors[0], wheel_TN=np.array([[costheta[car],-sintheta[car]], [sintheta[car],costheta[car]]]), mu=mu[car,0],roll_resistance_coef=roll_resistance_coef[car,0])
+            #     wheel_force_FR = surface_force_per_mass(wheel_rvector=wheel_rvectors[1], wheel_TN=np.array([[costheta[car],-sintheta[car]], [sintheta[car],costheta[car]]]), mu=mu[car,1],roll_resistance_coef=roll_resistance_coef[car,1])
+            #     wheel_force_BL = surface_force_per_mass(wheel_rvector=wheel_rvectors[2], wheel_TN=np.eye(2)                                            , mu=mu[car,2],roll_resistance_coef=roll_resistance_coef[car,2])
+            #     wheel_force_BR = surface_force_per_mass(wheel_rvector=wheel_rvectors[3], wheel_TN=np.eye(2)                                            , mu=mu[car,3],roll_resistance_coef=roll_resistance_coef[car,3])
                 
-                # translational force
-                acceleration_surface_car_frame = np.mean( np.column_stack([wheel_force_FL, wheel_force_FR, wheel_force_BL, wheel_force_BR]), axis=1)
+            #     # translational force
+            #     acceleration_surface_car_frame = np.mean( np.column_stack([wheel_force_FL, wheel_force_FR, wheel_force_BL, wheel_force_BR]), axis=1)
 
-                # rotational force
-                def cross2D(a,b):
-                    return a[0]*b[1] - a[1]*b[0]
-                torque_per_mass = ( cross2D(wheel_rvectors[0], wheel_force_FL-wheel_force_BR) + 
-                                    cross2D(wheel_rvectors[1], wheel_force_FR-wheel_force_BL) ) /4
+            #     # rotational force
+            #     def cross2D(a,b):
+            #         return a[0]*b[1] - a[1]*b[0]
+            #     torque_per_mass[car] = ( cross2D(wheel_rvectors[0], wheel_force_FL-wheel_force_BR) + 
+            #                              cross2D(wheel_rvectors[1], wheel_force_FR-wheel_force_BL) ) /4
 
-                ### Add air resistance ###
-                acceleration_surface = from_frame(acceleration_surface_car_frame, car_TN[car])
-                acceleration = acceleration_surface - air_resistance_coef * np.linalg.norm(velocity[car,:]) * velocity[car,:]
+            #     ### Add air resistance ###
+            #     acceleration_surface = from_frame(acceleration_surface_car_frame, car_TN[car])
+            #     acceleration[car] = acceleration_surface - air_resistance_coef * np.linalg.norm(velocity[car,:]) * velocity[car,:]
 
-                ### Apply integration scheme ###
-                position[car] += dt/2 * velocity[car]
-                velocity[car] += dt * acceleration
-                position[car] += dt/2 * velocity[car]
+            ### Apply integration scheme ###
+            position += dt/2 * velocity
+            velocity += dt * acceleration
+            position += dt/2 * velocity
 
-                orientation[car] += dt/2 * omega[car]
-                omega[car] += dt / moment_of_inertia_per_mass * torque_per_mass
-                orientation[car] += dt/2 * omega[car]
+            orientation += dt/2 * omega
+            omega += dt / moment_of_inertia_per_mass * torque_per_mass
+            orientation += dt/2 * omega
             
+            ###   ###
             car_TN = get_TN_from_angle(orientation)
 
             position_local, velocity_local, TN_local = self.circuit.to_local(position,velocity,segment,reached_turning)
@@ -530,6 +590,7 @@ air_resistance_coef = .5 * air_density * drag_coefficient * frontal_area
 
 road_width = 12 #[meters]
 dt = 1/8
+video_speedup = 2
 
 frameSize = (1280,720)
 # fig_size_pixels = (1920,1080) #[pixels]
