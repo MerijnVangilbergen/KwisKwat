@@ -13,9 +13,23 @@ import time
 # Select folders
 video_folder = '../videos'
 
-def vector2angle(vector,deg=False):
-    complex_number = vector[0] + vector[1] *1j
-    return np.angle(complex_number, deg=deg)
+
+def vector2angle(vector):
+    # Given a (radial) vector, return the angle with the x-axis.
+    # The angle is expressed in the interval [-pi, pi].
+    if vector.ndim == 1:
+        # The input is np.array([x,y])
+        return np.arctan2(vector[1], vector[0])
+    else:
+        # The input is a Nx2 array. Every row corresponds to one vector. The output is an array of length N with all corresponding angles.
+        return np.arctan2(vector[:,1], vector[:,0])
+
+def angle_minus(a,b):
+    # Calculate a-b such that the output is in (-pi,pi] (assuming both a and b are withing (-pi,pi]).
+    diff = a-b
+    diff[diff <= -np.pi] += 2*np.pi
+    diff[diff > np.pi] -= 2*np.pi
+    return diff
 
 def rotate90left(vector):
     # Both input and output are numpy arrays of size 2.
@@ -33,7 +47,6 @@ def from_frame(vector,frame_TN):
     # The output represents the same vector as the input, but is expressed in the global frame.
     return frame_TN @ vector
 
-
 class CIRCUIT:
     def __init__(self,size,startlength,N):
         def select_checkpoints():
@@ -42,7 +55,7 @@ class CIRCUIT:
                             [(size[0]+startlength)/2, 0], #end finish line
                             np.column_stack([np.random.uniform(0,size[0],N-2), np.random.uniform(0,size[1],N-2)]) ])
             # Replace points that are too close to each other
-            minimal_separation_distance = 3*default_width
+            minimal_separation_distance = 3*road_width
             for ii in range(2,len(p)):
                 while True:
                     separation = np.linalg.norm(p[ii]-p[0:ii],axis=1)
@@ -50,7 +63,7 @@ class CIRCUIT:
                         p[ii] = np.column_stack([np.random.uniform(0,size[0]), np.random.uniform(0,size[1])])
                     else:
                         break
-            p = np.roll(p,-1,axis=0) # Such that the finish line is the line segment between checkpoints N and 0
+            p = np.roll(p,-1,axis=0) # Such that the finish line is the line segment between checkpoints N-1 and 0
 
             # Choose an order of check points such that there are no intersections
             p, dir = untangle_knot(p)
@@ -120,7 +133,7 @@ class CIRCUIT:
             jj = 1
             while ii < N:
                 #Check whether any check_point jj is too close to line segment ii.
-                minimal_distance = default_width * 1.1
+                minimal_distance = road_width * 1.1
                 coord = (p[jj]-p[ii]) @ np.column_stack([tangent[ii],normal[ii]])
                 if np.abs(coord[1])<minimal_distance and coord[0]<=0 and coord[0]>=-length[ii]:
                     #Check_point jj is too close to line segment ii. We move check_point jj away from line segment ii along the normal of line segment ii.
@@ -187,6 +200,7 @@ class CIRCUIT:
                 return dist_to_intersection
         
         self.size = size
+
         check_points,tangent,normal,length = select_checkpoints()
         
         difftangent = np.diff(np.vstack([tangent,tangent[0]]), axis=0)
@@ -194,11 +208,11 @@ class CIRCUIT:
         difftangent = difftangent / difftangent_len[:,np.newaxis]
         dist2center = np.zeros(N)
         for ii in range(N):
-            dist2center_min = default_width / np.sqrt(2*(1-np.abs(np.dot(tangent[ii],tangent[(ii+1)%N]))))
+            dist2center_min = road_width / np.sqrt(2*(1-np.abs(np.dot(tangent[ii],tangent[(ii+1)%N]))))
             dist2center_max = np.min(length[[ii,(ii+1)%N]]) / np.sqrt(2*(1+np.abs(np.dot(tangent[ii],tangent[(ii+1)%N]))))
             # while dist2center_min > dist2center_max:
             #     # Move the checkpoint further from its neighbouring checkpoints if the turning is too narrow.
-            #     check_points[ii] -= difftangent[ii] * default_width
+            #     check_points[ii] -= difftangent[ii] * road_width
             #     tangent[[ii,(ii+1)%N]], normal[[ii,(ii+1)%N]], length[[ii,(ii+1)%N]] = check_points_to_frenet(check_points[[ii-1,ii,(ii+1)%N]])
             #     print('Checkpoint ',ii,' was moved in order to handle a sharp turning')
             #     dist2center_min = 
@@ -217,27 +231,59 @@ class CIRCUIT:
         angle_change = turning_left * np.arccos( np.sum(tangent * np.roll(tangent,-1,axis=0), axis=1) )
         angle_final = np.array([vector2angle(-turning_left[ii] * normal[(ii+1)%N]) for ii in range(N)])
 
-        self.data = pd.DataFrame(data={'TN': [np.column_stack([tangent[dummy],normal[dummy]]) for dummy in range(N)],
-                                       'length': [length[dummy] for dummy in range(N)],
-                                       'destination': [destination[dummy] for dummy in range(N)],
-                                       'center': [centers[dummy] for dummy in range(N)],
-                                       'radius': radius,
-                                       'curvature': curvature,
-                                       'angle_change': angle_change,
-                                       'angle_final': angle_final})
+        # self.data = pd.DataFrame(data={'TN': [np.column_stack([tangent[dummy],normal[dummy]]) for dummy in range(N)],
+        #                                'length': [length[dummy] for dummy in range(N)],
+        #                                'destination': [destination[dummy] for dummy in range(N)],
+        #                                'center': [centers[dummy] for dummy in range(N)],
+        #                                'radius': radius,
+        #                                'curvature': curvature,
+        #                                'angle_change': angle_change,
+        #                                'angle_final': angle_final})
         # print('circuit data: \n ', self.data)
+        
+        self.destination = destination      # shape (Nsegments,2)
+        self.TN = np.zeros((N,2,2))         # shape (Nsegments,2,2)
+        self.TN[:,:,0] = tangent
+        self.TN[:,:,1] = normal
+        self.length = length                # shape Nsegments
+        self.center = centers               # shape (Nsegments,2)
+        self.radius = radius                # shape Nsegments
+        self.curvature = curvature          # shape Nsegments
+        self.angle_change = angle_change    # shape Nsegments
+        self.angle_final = angle_final      # shape Nsegments
 
-        self.start = self.data.at[0,'destination'] - self.data.at[0,'length']/2 * self.data.at[0,'TN'][:,0]
-        self.finish = self.start
+        self.start = self.destination[0,:] - self.length[0]/2 * self.TN[0,:,0]
+        # self.finish = self.start
 
+    def to_local(self,position,velocity,segment,reached_turning):
+        # position and velocity have shape (Ncars,2), the rows represent the cars' positions and velocities.
+        # segment and reached_turning have length Ncars, they represent in which circuit segment the cars are.
+
+        # Express position and velocity in local coordinates
+        TN_local = np.zeros((len(segment),2,2))
+        TN_local[np.logical_not(reached_turning)] = self.TN[segment[np.logical_not(reached_turning)]]
+        disp_from_center = position[reached_turning] - self.center[segment[reached_turning]]
+        dist_from_center = -np.sign(self.radius[segment[reached_turning]]) * np.linalg.norm(disp_from_center, axis=1)
+        TN_local[reached_turning,:,1] = disp_from_center / dist_from_center[:,np.newaxis]
+        TN_local[reached_turning,0,0] = TN_local[reached_turning,1,1] #Tx = Ny
+        TN_local[reached_turning,1,0] = -TN_local[reached_turning,0,1] #Ty = -Nx
+
+        position_local = np.zeros((len(segment),2))
+        position_local[np.logical_not(reached_turning)] = np.matmul((position[np.logical_not(reached_turning)]-self.destination[segment[np.logical_not(reached_turning)],:])[:, np.newaxis, :], TN_local[np.logical_not(reached_turning)]).squeeze()
+        position_local[reached_turning,1] = dist_from_center - self.radius[segment[reached_turning]]
+        position_local[reached_turning,0] = angle_minus(vector2angle(disp_from_center), self.angle_final[segment[reached_turning]]) / self.angle_change[segment[reached_turning]]
+
+        velocity_local = np.matmul(velocity[:, np.newaxis, :], TN_local).squeeze()
+        return (position_local, velocity_local, TN_local)
+    
     def plot(self):
         # We construct a series of 2D points to be plotted
         all_points = np.empty((0,2))
-        for ii in range(len(self.data)):
-            theta = np.linspace(self.data.at[ii, 'angle_final'] - self.data.at[ii, 'angle_change'], 
-                                self.data.at[ii, 'angle_final'])
-            turning = self.data.at[ii, 'center'] + self.data.at[ii, 'radius'] * np.column_stack([np.cos(theta), np.sin(theta)])
-            all_points = np.vstack([all_points, self.data.at[ii, 'destination'], turning])
+        for segment in range(len(self.length)):
+            theta = np.linspace(self.angle_final[segment] - self.angle_change[segment], 
+                                self.angle_final[segment])
+            turning = self.center[segment,:] + self.radius[segment] * np.column_stack([np.cos(theta), np.sin(theta)])
+            all_points = np.vstack([all_points, self.destination[segment,:], turning])
         pitstop_points = np.vstack([all_points[-1,:], all_points[0,:]])
         all_points = np.vstack([all_points,all_points[0]])
 
@@ -246,19 +292,19 @@ class CIRCUIT:
         fig = plt.figure(figsize=fig_size)
         ax = fig.add_axes([0,0,1,1])
         ax.set_aspect('equal')
-        ax.set_xlim(-default_width,circuit_size[0]+default_width)
-        ax.set_ylim(-default_width,circuit_size[1]+default_width)
+        ax.set_xlim(-road_width,circuit_size[0]+road_width)
+        ax.set_ylim(-road_width,circuit_size[1]+road_width)
         ax.set_facecolor('green')
 
         # Plot the pitstop
-        ax.plot(pitstop_points[:,0], pitstop_points[:,1], 'w-', linewidth=fig.dpi*ipm*default_width*2.1)
-        # ax.plot(pitstop_points[:,0], pitstop_points[:,1], 'r--',linewidth=fig.dpi*ipm*default_width*2.1, dashes=(1,1))
-        ax.plot(pitstop_points[:,0], pitstop_points[:,1], color=(0.3, 0.3, 0.3), linestyle='-', linewidth=fig.dpi*ipm*default_width*2)
+        ax.plot(pitstop_points[:,0], pitstop_points[:,1], 'w-', linewidth=fig.dpi*ipm*road_width*2.1)
+        # ax.plot(pitstop_points[:,0], pitstop_points[:,1], 'r--',linewidth=fig.dpi*ipm*road_width*2.1, dashes=(1,1))
+        ax.plot(pitstop_points[:,0], pitstop_points[:,1], color=(0.3, 0.3, 0.3), linestyle='-', linewidth=fig.dpi*ipm*road_width*2)
 
         # Plot the track
-        ax.plot(all_points[:,0], all_points[:,1], 'w-', linewidth=fig.dpi*ipm*default_width*1.1)
-        ax.plot(all_points[:-1,0], all_points[:-1,1], 'r--',linewidth=fig.dpi*ipm*default_width*1.1, dashes=(1,1))
-        ax.plot(all_points[:,0], all_points[:,1], color=(0.3, 0.3, 0.3), linestyle='-', linewidth=fig.dpi*ipm*default_width)
+        ax.plot(all_points[:,0], all_points[:,1], 'w-', linewidth=fig.dpi*ipm*road_width*1.1)
+        ax.plot(all_points[:-1,0], all_points[:-1,1], 'r--',linewidth=fig.dpi*ipm*road_width*1.1, dashes=(1,1))
+        ax.plot(all_points[:,0], all_points[:,1], color=(0.3, 0.3, 0.3), linestyle='-', linewidth=fig.dpi*ipm*road_width)
         return fig,ax
 
 CAR = namedtuple("CAR", "acceleration brake grip tank")
@@ -267,7 +313,7 @@ class AGENT:
     def __init__(self):
         self.neural_network = 1
     def getAction(self):
-        acceleration = np.random.uniform(-1,10)
+        acceleration = np.random.uniform(-1,20)
         steering = np.random.uniform(-1,1)
         return (acceleration, steering)
 
@@ -278,97 +324,99 @@ class RACE:
         self.cars = cars
     def simulate(self,save=False):
         def draw_cars_and_save_frame():
-            # Copy the circuit figure
-            fig2 = copy.deepcopy(fig)
-            ax2 = fig2.get_axes()[0]
+            try:
+                # Copy the circuit figure
+                fig2 = copy.deepcopy(fig)
+                ax2 = fig2.get_axes()[0]
 
-            # Draw the cars in the correct position ans orientation
-            zorder = max(artist.get_zorder() for artist in ax2.get_children())
-            for car in range(len(self.cars)):
-                zorder += 1
-                p = position[:,[car]]
-                TN = car_TN[:,:,car]
-                transformation = transforms.Affine2D(matrix=np.block([[TN,p], [0,0,1]]))
-                ax2.imshow(img,
-                          extent = [-car_size[0]/2, car_size[0]/2, -car_size[1]/2, car_size[1]/2],
-                          transform = transformation + ax2.transData,
-                          zorder = zorder)
-        
-            # Draw the plot onto a canvas
-            canvas = FigureCanvas(fig2)
-            canvas.draw()
-
-            # Get the RGBA buffer from the canvas and convert to BGR
-            frame = np.array(canvas.renderer._renderer)
-            frame = cv2.cvtColor(frame, cv2.COLOR_RGBA2BGR)
+                # Draw the cars in the correct position ans orientation
+                zorder = max(artist.get_zorder() for artist in ax2.get_children())
+                for car in range(len(self.cars)):
+                    zorder += 1
+                    p = position[[car],:].T # This is a 2*1 column array
+                    TN = car_TN[car]        # This is a 2*2 array
+                    transformation = transforms.Affine2D(matrix=np.block([[TN,p], [0,0,1]]))
+                    ax2.imshow(img,
+                            extent = [-car_size[0]/2, car_size[0]/2, -car_size[1]/2, car_size[1]/2],
+                            transform = transformation + ax2.transData,
+                            zorder = zorder)
             
-            # Write the frame to the video
-            out.write(frame)
-        
-        def map_to_agent_state(global_state):
-            # Output: the agent state, stored as a numpy array. The elements represent the following:
-                # Car stats
-                # --- time left in the race
-                # position along the tangent wrt the destination (distance to next segment)
-                # position along the normal wrt the destination (deviation from the road center)
-                # velocity along the tangent wrt the destination
-                # velocity along the normal wrt the destination
-                # curvature of current segment
-                # curvature of next segment
-                # length of next segment
-                # --- orientation or drift
-                # --- difference in total elapsed distance wrt first car ahead
-                # --- normal coordinate of first car ahead
-                # --- difference in total elapsed distance wrt first car behind
-                # --- normal coordinate of first car behind
+                # Draw the plot onto a canvas
+                canvas = FigureCanvas(fig2)
+                canvas.draw()
 
-            car=0 #MAKE THIS AN INPUT ARGUMENT
-            if reached_turning[car]:
-                radial_position = position[:,car] - self.circuit.data.at[segment[car],'centers']
-                angle = vector2angle(radial_position)
-                radius = np.linalg(radial_position)
-                return np.concatenate(( self.cars[car], #car stats
-                                    [self.circuit.data.at[segment[car],'radius'] * (angle-self.circuit.data.at[segment[car],'angle_final']), #distance to next segment
-                                        (radius-self.circuit.data.at[segment[car],'radius']) * np.sign(self.circuit.data.at[segment[car],'curvature']), #deviation from the road center
-                                        #velocity
-                                        self.circuit.data.at[segment[car],'curvature'], #curvature of current segment
-                                        0 #curvature of next segment
-                                    ]
-                                        ))
-            else:
-                return np.concatenate(( self.cars[car], #car stats
-                                        (np.vstack([ position[:,car]-self.circuit.data.at[segment[car],'destination'],
-                                                     velocity[:,car] ])
-                                        @ self.circuit.data.at[segment[car],'TN']
-                                        ).reshape(-1), #position and velocity
-                                        [0, self.circuit.data.at[(segment[car]+1)%self.circuit.data.shape[0],'curvature']] #curvature of current and next segment
-                                        ))
+                # Get the RGBA buffer from the canvas and convert to BGR
+                frame = np.array(canvas.renderer._renderer)
+                frame = cv2.cvtColor(frame, cv2.COLOR_RGBA2BGR)
+                
+                # Write the frame to the video
+                out.write(frame)
+            except:
+                print('Frame skipped due to error')
+        
+        # def map_to_agent_state(global_state):
+        #     # Output: the agent state, stored as a numpy array. The elements represent the following:
+        #         # Car stats
+        #         # --- time left in the race
+        #         # position along the tangent wrt the destination (distance to next segment)
+        #         # position along the normal wrt the destination (deviation from the road center)
+        #         # velocity along the tangent wrt the destination
+        #         # velocity along the normal wrt the destination
+        #         # curvature of current segment
+        #         # curvature of next segment
+        #         # length of next segment
+        #         # --- orientation or drift
+        #         # --- difference in total elapsed distance wrt first car ahead
+        #         # --- normal coordinate of first car ahead
+        #         # --- difference in total elapsed distance wrt first car behind
+        #         # --- normal coordinate of first car behind
+
+        #     car=0 #MAKE THIS AN INPUT ARGUMENT
+        #     if reached_turning[car]:
+        #         radial_position = position[:,car] - self.circuit.data.at[segment[car],'centers']
+        #         angle = vector2angle(radial_position)
+        #         radius = np.linalg(radial_position)
+        #         return np.concatenate(( self.cars[car], #car stats
+        #                             [self.circuit.data.at[segment[car],'radius'] * (angle-self.circuit.data.at[segment[car],'angle_final']), #distance to next segment
+        #                                 (radius-self.circuit.data.at[segment[car],'radius']) * np.sign(self.circuit.data.at[segment[car],'curvature']), #deviation from the road center
+        #                                 #velocity
+        #                                 self.circuit.data.at[segment[car],'curvature'], #curvature of current segment
+        #                                 0 #curvature of next segment
+        #                             ]
+        #                                 ))
+        #     else:
+        #         return np.concatenate(( self.cars[car], #car stats
+        #                                 (np.vstack([ position[:,car]-self.circuit.data.at[segment[car],'destination'],
+        #                                              velocity[:,car] ])
+        #                                 @ self.circuit.data.at[segment[car],'TN']
+        #                                 ).reshape(-1), #position and velocity
+        #                                 [0, self.circuit.data.at[(segment[car]+1)%self.circuit.data.shape[0],'curvature']] #curvature of current and next segment
+        #                                 ))
 
         def get_TN_from_angle(angle):
-            # Define TN such that TN[:,:,n] is a 2*2 matrix of which the columns represent the tangent and normal corresponding to angle[n].
-            TN = np.zeros((2,2,len(angle)))
+            # Define TN such that TN[n,:,:] is a 2*2 matrix of which the columns represent the tangent and normal corresponding to angle[n].
+            TN = np.zeros((len(angle),2,2))
             cos = np.cos(angle)
             sin = np.sin(angle)
-            TN[0,0,:] = cos
-            TN[0,1,:] = sin
-            TN[1,0,:] = -sin
-            TN[1,1,:] = cos
+            TN[:,0,0] = cos     #Tx = cos(angle)
+            TN[:,1,0] = sin     #Ty = sin(angle)
+            TN[:,0,1] = -sin    #Nx = -sin(angle)
+            TN[:,1,1] = cos     #Nx = cos(angle)
             return TN
 
         ### Initial state ###
-        # All state variables contain one column for every car
-        a = np.linspace((.5-1/(len(self.cars)+1))*default_width, (-.5+1/(len(self.cars)+1))*default_width, len(self.cars))
-        position = self.circuit.start[:,np.newaxis] + a * self.circuit.data.at[0,'TN'][:,[1]]
-        velocity = np.zeros((2, len(self.cars)))
-        orientation = np.zeros(len(self.cars))
-        omega = np.zeros(len(self.cars))
-        health = np.ones(len(self.cars))
-        segment = np.zeros(len(self.cars))
-        reached_turning = np.repeat(False,len(self.cars))
+        position = np.repeat([self.circuit.start], len(self.cars), axis=0)  # shape (Ncars, 2)
+        velocity = np.zeros((len(self.cars), 2))                            # shape (Ncars, 2)
+        orientation = np.zeros(len(self.cars))                              # shape Ncars
+        car_TN = get_TN_from_angle(orientation)                             # shape (Ncars,2,2)
+        omega = np.zeros(len(self.cars))                                    # shape Ncars
+        health = np.ones(len(self.cars))                                    # shape Ncars
+        segment = np.zeros(len(self.cars), dtype=int)                       # shape Ncars
+        reached_turning = np.repeat(False,len(self.cars))                   # shape Ncars
+        position_local, velocity_local, TN_local = self.circuit.to_local(position,velocity,segment,reached_turning)
 
         # Draw the circuit
         if save:
-            car_TN = get_TN_from_angle(orientation)
             fourcc = cv2.VideoWriter_fourcc(*'XVID')
             out = cv2.VideoWriter(video_folder+'/output_video.avi', fourcc, fps=1/dt, frameSize=frameSize)
             fig,ax = self.circuit.plot()
@@ -376,9 +424,8 @@ class RACE:
             draw_cars_and_save_frame()
 
         ### Simulation ###
-        numOfSteps = 20
+        numOfSteps = 500
         for tt in range(numOfSteps):
-            car_TN = get_TN_from_angle(orientation)
             
             # Determine the inputs to the neural networks, i.e. what the agent sees.
 
@@ -387,15 +434,28 @@ class RACE:
             actions = [agent.getAction() for agent in self.agents]
             # actions = getActions(states,agents)
 
+            ### Determine whether wheels are on road or grass ###
+            # car_TN_local = TN_local.transpose() @ car_TN
+            # car_Normal_local = TN_local.transpose() @ car_Normal
+            car_Normal_local = np.matmul(np.transpose(TN_local,(0,2,1)), car_TN[:,:,1,np.newaxis]).squeeze() # shape (Ncars,2)
+            
+            # wheels_Npos_local = position_local[1] + np.dot(car_Normal_local, wheel_rvector)
+            wheels_Npos_local = position_local[:,np.newaxis,1] + np.tensordot(car_Normal_local[:,np.newaxis,:], wheel_rvectors[np.newaxis,:,:], axes=(2,2)).squeeze() #shape (Ncars,Nwheels)
+            off_road = np.abs(wheels_Npos_local) > road_width/2 #shape (Ncars,Nwheels)
+            mu = np.full(np.shape(off_road), mu_road) #shape (Ncars,Nwheels)
+            roll_resistance_coef = np.full(np.shape(off_road), roll_resistance_coef_road) #shape (Ncars,Nwheels)
+            mu[off_road] = mu_grass
+            roll_resistance_coef[off_road] = roll_resistance_coef_grass
+
             for car in range(len(self.cars)):
                 ### Derive the forces exerted by the road ###
                 # All vectors in this section are expressed in the car frame. I.e. (1,0) corresponds to the car tangent and (0,1) corresponds to the car normal.
-                def surface_force_per_mass(wheel_rvector,wheel_TN,mu):
-                    velocity_car_frame = to_frame(velocity[:,car], frame_TN=car_TN[:,:,car])
+                def surface_force_per_mass(wheel_rvector,wheel_TN,mu,roll_resistance_coef):
+                    velocity_car_frame = to_frame(velocity[car,:], frame_TN=car_TN[car])
                     wheel_velocity = velocity_car_frame + omega[car] * rotate90left(wheel_rvector)
-                    acc_tangent = acc_motor - roll_resistance_coef
-                    v_N = np.dot(wheel_velocity,wheel_TN[:,1])
-                    acc_normal = -v_N /dt #This centripital friction is required to prevent centrifugal drift
+                    wheel_velocity_wheel_frame = to_frame(wheel_velocity, frame_TN=wheel_TN) #wheel_TN is expressed in the car frame, so this brings the vector from the car frame to the wheel frame.
+                    acc_tangent = acc_motor - np.sign(wheel_velocity_wheel_frame[1]) * roll_resistance_coef
+                    acc_normal = -wheel_velocity_wheel_frame[1] /dt #This centripital friction is required to prevent centrifugal drift
 
                     acc = np.array([acc_tangent,acc_normal])
                     acc_norm = np.linalg.norm(acc)
@@ -407,10 +467,10 @@ class RACE:
                 sintheta = actions[car][1] #theta is the angle between the car tangent and the front wheel tangent
                 costheta = np.sqrt(1-sintheta**2)
 
-                wheel_force_FL = surface_force_per_mass(wheel_rvector= wheel_rvectors[0], wheel_TN=np.array([[costheta,sintheta], [-sintheta,costheta]]), mu=mu_road)
-                wheel_force_FR = surface_force_per_mass(wheel_rvector= wheel_rvectors[1], wheel_TN=np.array([[costheta,sintheta], [-sintheta,costheta]]), mu=mu_road)
-                wheel_force_BL = surface_force_per_mass(wheel_rvector=-wheel_rvectors[1], wheel_TN=np.eye(2)                                            , mu=mu_road)
-                wheel_force_BR = surface_force_per_mass(wheel_rvector=-wheel_rvectors[0], wheel_TN=np.eye(2)                                            , mu=mu_road)
+                wheel_force_FL = surface_force_per_mass(wheel_rvector=wheel_rvectors[0], wheel_TN=np.array([[costheta,-sintheta], [sintheta,costheta]]), mu=mu[car,0],roll_resistance_coef=roll_resistance_coef[car,0])
+                wheel_force_FR = surface_force_per_mass(wheel_rvector=wheel_rvectors[1], wheel_TN=np.array([[costheta,-sintheta], [sintheta,costheta]]), mu=mu[car,1],roll_resistance_coef=roll_resistance_coef[car,1])
+                wheel_force_BL = surface_force_per_mass(wheel_rvector=wheel_rvectors[2], wheel_TN=np.eye(2)                                            , mu=mu[car,2],roll_resistance_coef=roll_resistance_coef[car,2])
+                wheel_force_BR = surface_force_per_mass(wheel_rvector=wheel_rvectors[3], wheel_TN=np.eye(2)                                            , mu=mu[car,3],roll_resistance_coef=roll_resistance_coef[car,3])
                 
                 # translational force
                 acceleration_surface_car_frame = np.mean( np.column_stack([wheel_force_FL, wheel_force_FR, wheel_force_BL, wheel_force_BR]), axis=1)
@@ -422,27 +482,31 @@ class RACE:
                                     cross2D(wheel_rvectors[1], wheel_force_FR-wheel_force_BL) ) /4
 
                 ### Add air resistance ###
-                acceleration_surface = from_frame(acceleration_surface_car_frame, car_TN[:,:,car])
-                acceleration = acceleration_surface - air_resistance_coef * np.linalg.norm(velocity[:,car]) * velocity[:,car]
+                acceleration_surface = from_frame(acceleration_surface_car_frame, car_TN[car])
+                acceleration = acceleration_surface - air_resistance_coef * np.linalg.norm(velocity[car,:]) * velocity[car,:]
 
                 ### Apply integration scheme ###
-                position[:,car] += dt/2 * velocity[:,car]
-                velocity[:,car] += dt * acceleration
-                position[:,car] += dt/2 * velocity[:,car]
+                position[car] += dt/2 * velocity[car]
+                velocity[car] += dt * acceleration
+                position[car] += dt/2 * velocity[car]
 
                 orientation[car] += dt/2 * omega[car]
                 omega[car] += dt / moment_of_inertia_per_mass * torque_per_mass
                 orientation[car] += dt/2 * omega[car]
-                
-            # position_local = to_local(position)
+            
+            car_TN = get_TN_from_angle(orientation)
 
-            # reached_next_checkpoint = position_local[1,:]>=0
-            # reached_turning[reached_next_checkpoint] = np.logical_not(reached_turning[reached_next_checkpoint])
-            # segment[reached_turning & reached_next_checkpoint] += 1
+            position_local, velocity_local, TN_local = self.circuit.to_local(position,velocity,segment,reached_turning)
+            reached_next_checkpoint = position_local[:,0]>=0
+            segment[reached_turning & reached_next_checkpoint] += 1
+            reached_turning[reached_next_checkpoint] = np.logical_not(reached_turning[reached_next_checkpoint])
 
-            # finished_lap = segment == self.circuit.data.shape[0]
+            finished_lap = segment == len(self.circuit.length)
+            segment[finished_lap] = 0
             # laps[finished_lap] += 1
             # distance[finished_lap] = laps * lap_distance + position_local[1,finished_lap]
+            
+            print('\n segment:', segment, '\n reached_turning:', reached_turning)
 
             if save:
                 draw_cars_and_save_frame()
@@ -454,11 +518,11 @@ class RACE:
 g = 9.81 #[m/s²]
 
 # Friction parameters
-mu_road = 1.6
-mu_grass = .5
+mu_road = 1.5
+mu_grass = .65
 drift_multiplyer = .85
-dimensionless_roll_resistance_coef = .01
-roll_resistance_coef = dimensionless_roll_resistance_coef * g
+roll_resistance_coef_road = .014 * g # range 0.007 to 0.02
+roll_resistance_coef_grass = .05 * g # range 0.007 to 0.02
 
 # Drag parameters 
 air_density = 1.225 #[kg/m³]
@@ -466,7 +530,7 @@ drag_coefficient = .7 #usually ranges between 0.7 to 1.1
 frontal_area = 1.75 #[m²] around 1.5 to 2.0 square meters
 air_resistance_coef = .5 * air_density * drag_coefficient * frontal_area
 
-default_width = 12 #[meters]
+road_width = 12 #[meters]
 dt = 1/8
 
 frameSize = (1280,720)
@@ -476,19 +540,20 @@ circuit_width = 500 #[meters]
 ipm = fig_size[0]/circuit_width #inches per meter
 circuit_size = (circuit_width, fig_size[1] /ipm) #[meters]
 car_size = np.array([5,2.5]) #[meters]
-wheel_rvectors = [np.array([-car_size[0],car_size[1]])/2, #front left wheel
-                  np.array([ car_size[0],car_size[1]])/2 ] #front right wheel
+wheel_rvectors = np.array([ [ car_size[0], car_size[1]], #front left wheel
+                            [ car_size[0],-car_size[1]], #front right wheel
+                            [-car_size[0], car_size[1]], #back left wheel
+                            [-car_size[0],-car_size[1]]  #back right wheel
+                            ]) /2                        #shape (4,2)
 moment_of_inertia_per_mass = (car_size[0]**2 + car_size[1]**2) /12 + car_size[0] * car_size[1] /8
 
 circuit = CIRCUIT(size=circuit_size,startlength=250,N=20)
 # fig,ax = circuit.plot()
 # plt.show()
 
-agent1 = AGENT()
-agent2 = AGENT()
-car1 = CAR(1,1,1,1)
-car2 = CAR(1,1,1,1)
-race = RACE(circuit,[agent1,agent2], [car1,car2])
+agents = [AGENT() for dummy in range(10)]
+cars = [CAR(1,1,1,1) for dummy in range(10)]
+race = RACE(circuit,agents, cars)
 
 start = time.time()
 race.simulate(save=True)
