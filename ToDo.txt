@@ -1,8 +1,5 @@
-- Define circuit.start
-- Change to rear wheel drive?
+- Fix linewidth
+- Improve resolution (because of mp4 warning?)
 - Program health
-- LENGTH_NEXT AND CURVATURE(_NEXT) SHOULD ONLY BE UPDATED WHEN A NEW SEGMENT IS ENTERED
-	# length_future[reached_next_checkpoint,:] = np.column_stack(length_future[reached_next_checkpoint,1:], new_column)
-	# curvature_future[reached_next_checkpoint,:] = np.column_stack(curvature_future[reached_next_checkpoint,1:], new_column)
 - Add punishments as counters
-- Check length_future and curvature_future by printing
+- Change to rear wheel drive?
