@@ -1,5 +1,2 @@
-- Fix linewidth
-- Improve resolution (because of mp4 warning?)
+- Derive distance_left instead of time_left
 - Program health
-- Add punishments as counters
-- Change to rear wheel drive?

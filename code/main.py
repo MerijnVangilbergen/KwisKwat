@@ -68,13 +68,32 @@ def to_frame(vector,frame_TN):
     
 
 class CIRCUIT:
-    def __init__(self,size,N):
-        primitive = self.PRIMITIVE_CIRCUIT(size,N)
+    def __init__(self,circuit_diagonal,N):
+        # Create figure
+        self.fig = plt.figure(figsize=fig_size)
+        ax = self.fig.add_axes([0, 0, 1, 1])
+        # Remove x and y axes
+        for spine in ax.spines.values():
+            spine.set_visible(False)
+        ax.tick_params(bottom=False, labelbottom=False,
+                    left=False, labelleft=False)
+
+        # Extract ax_size [inches] and circuit_size [meters]
+        ax_size = fig_size * np.array([ax.figure.subplotpars.right - ax.figure.subplotpars.left, 
+                                       ax.figure.subplotpars.top - ax.figure.subplotpars.bottom])
+        ipm = np.linalg.norm(ax_size) / circuit_diagonal #inches per meter
+        self.dpm = self.fig.dpi * ipm * .87 #dots per meter
+            # This number is solely used for line_widths in the circuit plot. The factor .87 is a manual correction based on visual results.
+        self.size = ax_size / ipm #circuit_size [meters]
+
+        # Construct a primitive circuit (random choices) and copy the data
+        primitive = self.PRIMITIVE_CIRCUIT(self.size,N)
         self.Nsegments = primitive.Nsegments
         self.destination = primitive.destination
         self.TN = primitive.TN
         self.length = primitive.length
         
+        # Define turnings (random choices)
         dist2center = np.random.uniform(primitive.dist2center_min, primitive.dist2center_max)
         
         difftangent = np.diff(np.vstack([self.TN[:,:,0],self.TN[0,:,0]]), axis=0)
@@ -86,6 +105,15 @@ class CIRCUIT:
         self.destination += displacement_destination[:,np.newaxis] * self.TN[:,:,0]
         self.length += (displacement_destination + np.roll(displacement_destination,1,axis=0))
 
+        # Roll data such that segment 0 is the longest segment.
+        roll_idx = np.argmax(self.length)
+        self.destination = np.roll(self.destination, -roll_idx, axis=0)
+        self.TN = np.roll(self.TN, -roll_idx, axis=0)
+        self.length = np.roll(self.length, -roll_idx)
+        self.center = np.roll(self.center, -roll_idx, axis=0)
+        self.radius = np.roll(self.radius, -roll_idx)
+
+        # Derive other data (no choices)
         self.curvature = 1/self.radius # shape Nsegments
         turning_left = np.sign(self.radius)
         self.radius = np.abs(self.radius) # shape Nsegments
@@ -94,31 +122,20 @@ class CIRCUIT:
         self.length_turning = self.radius * np.abs(self.angle_change)
 
         self.orientation = vector2angle(self.TN[:,:,0]) # shape Nsegments
-        self.start = self.destination[0,:] - self.length[0]/2 * self.TN[0,:,0] # shape (Nsegments,2)
-        # self.finish = self.start
+
+        # Select start and finish
+        # The start line and finish line are always in segment[0].
+        self.start = self.destination[0,:] + self.TN[0] @ np.array([-.8 * self.length[0], (road_width-car_size[1]) *np.random.uniform(-.5, .5)]) # shape (Nsegments,2)
+        self.finish = -.2 * self.length[0] # This is the tangential component of the local position in segment[0]
     
     def plot(self):
-        # We construct a series of 2D points to be plotted
-        all_points = self.destination[0] - self.length[0]/2 * self.TN[0,:,0]
-        for segment in range(self.Nsegments):
-            theta = np.linspace(self.angle_final[segment] - self.angle_change[segment], 
-                                self.angle_final[segment])
-            turning = self.center[segment,:] + self.radius[segment] * np.column_stack([np.cos(theta), np.sin(theta)])
-            all_points = np.vstack([all_points, self.destination[segment,:], turning])
-        # pitstop_points = np.vstack([all_points[-1,:], all_points[0,:]])
-        all_points = np.vstack([all_points,all_points[0]])
+        ax = self.fig.get_axes()[0]
 
-        # Create figure
-        fig = plt.figure(figsize=fig_size)
-        ax = fig.add_axes([0,0,1,1])
         ax.set_aspect('equal')
-        ax.set_xlim(0,circuit_size[0])
-        ax.set_ylim(0,circuit_size[1])
-        # Remove x and y axes
-        for spine in ax.spines.values():
-            spine.set_visible(False)
-        ax.tick_params(bottom=False, labelbottom=False,
-                    left=False, labelleft=False)
+        ax.set_xlim(0,self.size[0])
+        ax.set_ylim(0,self.size[1])
+
+        # Background
         ax.set_facecolor('green')
 
         # # Plot the pitstop
@@ -127,16 +144,26 @@ class CIRCUIT:
         # ax.plot(pitstop_points[:,0], pitstop_points[:,1], color=(0.3, 0.3, 0.3), linestyle='-', linewidth=fig.dpi*ipm*road_width*2)
 
         # Plot the track
-        ax.plot(all_points[:,0], all_points[:,1], 'w-', linewidth=fig.dpi*ipm*road_width*1.1)
-        ax.plot(all_points[:,0], all_points[:,1], 'r--',linewidth=fig.dpi*ipm*road_width*1.1, dashes=(1,1))
-        ax.plot(all_points[:,0], all_points[:,1], color=(0.3, 0.3, 0.3), linestyle='-', linewidth=fig.dpi*ipm*road_width)
-        return fig,ax
+        all_points = self.destination[0] + self.finish * self.TN[0,:,0]
+        for segment in range(self.Nsegments):
+            theta = np.linspace(self.angle_final[segment] - self.angle_change[segment], 
+                                self.angle_final[segment])
+            turning = self.center[segment,:] + self.radius[segment] * np.column_stack([np.cos(theta), np.sin(theta)])
+            all_points = np.vstack([all_points, self.destination[segment,:], turning])
+        all_points = np.vstack([all_points,all_points[0]])
+        ax.plot(all_points[:,0], all_points[:,1], 'w-', linewidth=self.dpm*road_width*1.1)
+        ax.plot(all_points[:,0], all_points[:,1], 'r--',linewidth=self.dpm*road_width*1.1, dashes=(1,1))
+        ax.plot(all_points[:,0], all_points[:,1], color=(0.3, 0.3, 0.3), linestyle='-', linewidth=self.dpm*road_width)
+
+        # Plot the finish line
+        finish_points = self.destination[0,:][:,np.newaxis] + self.TN[0] @ np.column_stack([[self.finish, -road_width/2], [self.finish, road_width/2]])
+        ax.plot(finish_points[0,:], finish_points[1,:], 'w-', linewidth=self.dpm*.5) # 0.5 meters
     
     class PRIMITIVE_CIRCUIT:
         def __init__(self,size,N):
             self.size = size
             self.Nsegments = N
-            self.select_checkpoints(size,minimal_separation=3*road_width)
+            self.select_checkpoints(size,minimal_separation=5*road_width)
                 # This creates self.destination with shape (Nsegments,2)
             
             dir = np.diff(np.vstack([self.destination[-1], self.destination]), axis=0)
@@ -161,18 +188,17 @@ class CIRCUIT:
             # self.plot()
 
             while np.any(self.dist2center_min > self.dist2center_max):
-                print('Resolving turning issues')
                 self.resolve_turning_issues()
+                any_change = True
                 while any_change:
-                    print('Resolving overlap')
-                    self.resolve_overlap(minimal_separation=2*road_width)
+                    self.resolve_overlap(minimal_separation=1.5*road_width)
                     any_change = self.untangle_knot()
             # self.plot()
         
         def select_checkpoints(self,size,minimal_separation):
             # Select uniformly distributed points in the rectangular area
-            self.destination = np.vstack([ np.column_stack([np.random.uniform(road_width, size[0]-road_width, self.Nsegments), 
-                                                            np.random.uniform(road_width, size[1]-road_width, self.Nsegments)]) ])
+            self.destination = np.vstack([ np.column_stack([np.random.uniform(road_width/2, size[0]-road_width/2, self.Nsegments), 
+                                                            np.random.uniform(road_width/2, size[1]-road_width/2, self.Nsegments)]) ])
             # Replace points that are too close to each other
             for ii in range(self.Nsegments):
                 while True:
@@ -183,10 +209,12 @@ class CIRCUIT:
                         break
 
         def plot(self):
+            plt.figure()
             plt.plot(self.destination[:,0],self.destination[:,1])
             plt.show()
 
         def untangle_knot(self):
+            # print('Untangling knot')
             any_change = False
             ii = 0
             jj = self.Nsegments-2
@@ -221,44 +249,57 @@ class CIRCUIT:
             return any_change
 
         def resolve_overlap(self,minimal_separation):
+            # print('Resolving overlap')
             # Input: The destination must be ordered in a way that there are no intersections.
             # Taking into account the road width, some line segments may overlap. Any such occurrences are resolved by moving at least one check_point away from a line segment.
-            ii = 0
-            jj = 1
-            while ii < self.Nsegments:
-                #Check whether any check_point jj is too close to line segment ii.
-                coord = to_frame(vector=self.destination[jj]-self.destination[ii], frame_TN=self.TN[ii])
-                if np.abs(coord[1])<minimal_separation and coord[0]<=0 and coord[0]>=-self.length[ii]:
-                    #Check_point jj is too close to line segment ii. We move check_point jj away from line segment ii along the normal of line segment ii.
-                    new_checkpoint = self.destination[jj] + np.sign(coord[1]) * (minimal_separation-np.abs(coord[1])) * self.TN[ii,:,1]
-                    new_checkpoint[new_checkpoint<road_width] = road_width
-                    new_checkpoint = np.min([new_checkpoint, self.size-road_width], axis=1)
-                    self.update_checkpoint(idx=jj, new_checkpoint=self.destination[jj] + np.sign(coord[1]) * (minimal_separation-np.abs(coord[1])) * self.TN[ii,:,1])
-                    
-                jj = (jj+1)%self.Nsegments
-                if jj == (ii-1)%self.Nsegments:
-                    ii += 1
-                    jj = (ii+1)%self.Nsegments
+            any_change = True
+            count = 0
+            while any_change:
+                any_change = False
+                ii = 0
+                jj = 1
+                while ii < self.Nsegments:
+                    #Check whether any check_point jj is too close to line segment ii.
+                    coord = to_frame(vector=self.destination[jj]-self.destination[ii], frame_TN=self.TN[ii])
+                    if np.abs(coord[1])<minimal_separation and coord[0]<=0 and coord[0]>=-self.length[ii]:
+                        #Check_point jj is too close to line segment ii. We perform the following changes:
+                        # 1. We move check_point jj away from line segment ii along the normal of line segment ii.
+                        # 2. We move line segment ii away from check_point jj along the normal of line segment ii.
+                        last_jj = jj
+                        any_change = True
+                        r = np.random.uniform(0, 1)
+                        dir = np.sign(coord[1]) * self.TN[ii,:,1]
+                        self.move_along_dir(idx=jj  , dir= dir, dist=1.1*(1-r)*(minimal_separation-np.abs(coord[1])), minimal_separation=minimal_separation)
+                        self.move_along_dir(idx=ii  , dir=-dir, dist=1.1*   r *(minimal_separation-np.abs(coord[1])), minimal_separation=minimal_separation)
+                        self.move_along_dir(idx=ii-1, dir=-dir, dist=1.1*   r *(minimal_separation-np.abs(coord[1])), minimal_separation=minimal_separation)
+                        
+                    jj = (jj+1)%self.Nsegments
+                    if jj == (ii-1)%self.Nsegments:
+                        ii += 1
+                        jj = (ii+1)%self.Nsegments
+                if any_change:
+                    count += 1
+                    if count >= 100:
+                        self.remove_checkpoint(idx=last_jj)
         
         def resolve_turning_issues(self):
+            # print('Resolving turning issues')
             prev_idx = -1
             count = 0
             while np.any(self.dist2center_min > self.dist2center_max):
                 idx = np.argmax(self.dist2center_min - self.dist2center_max)
-                print('Resolving checkpoint', idx)
+                # print('Resolving checkpoint', idx)
 
                 # 1. Try -difftangent
                 difftangent = self.TN[idx,:,0]-self.TN[(idx+1)%self.Nsegments,:,0]
                 difftangent = difftangent/np.linalg.norm(difftangent)
                 self.move_along_dir(idx=idx, dir=-difftangent, minimal_separation=2*road_width)
                 if self.dist2center_min[idx] <= self.dist2center_max[idx]:
-                    # print('Resolved in attempt 1')
                     continue
                 
                 # 2. Try difftangent
                 self.move_along_dir(idx=idx, dir=difftangent, minimal_separation=2*road_width)
                 if self.dist2center_min[idx] <= self.dist2center_max[idx]:
-                    # print('Resolved in attempt 2')
                     continue
 
                 # 3. Try -difftangent again
@@ -266,7 +307,6 @@ class CIRCUIT:
                 difftangent = difftangent/np.linalg.norm(difftangent)
                 self.move_along_dir(idx=idx, dir=-difftangent, minimal_separation=2*road_width)
                 if self.dist2center_min[idx] <= self.dist2center_max[idx]:
-                    # print('Resolved in attempt 3')
                     continue
 
                 # 4. Try neighbouring points
@@ -278,7 +318,6 @@ class CIRCUIT:
                     self.move_along_dir(idx=idx-1, dir=-self.TN[idx,:,0], minimal_separation=2*road_width)
                 
                 if self.dist2center_min[idx] <= self.dist2center_max[idx]:
-                    # print('Resolved in attempt 4')
                     continue
 
                 # 5. Try moving the turning point away from the neirest neighbour
@@ -288,20 +327,18 @@ class CIRCUIT:
                     self.move_along_dir(idx=idx, dir=-self.TN[(idx+1)%self.Nsegments,:,0], minimal_separation=1.5*road_width)
 
                 if self.dist2center_min[idx] <= self.dist2center_max[idx]:
-                    # print('Resolved in attempt 5')
                     continue
 
                 # 6. Try moving the turning point towards its farest neighbour
                 if self.length[idx] < self.length[(idx+1)%self.Nsegments]:
-                    self.move_along_dir(idx=idx, dir=self.TN[(idx+1)%self.Nsegments,:,0], max_mov_dist=self.length[(idx+1)%self.Nsegments]/2)
+                    self.move_along_dir(idx=idx, dir=self.TN[(idx+1)%self.Nsegments,:,0], dist=self.length[(idx+1)%self.Nsegments]/2)
                 elif self.length[idx] > self.length[(idx+1)%self.Nsegments]:
-                    self.move_along_dir(idx=idx, dir=-self.TN[idx,:,0], max_mov_dist=self.length[idx]/2)
+                    self.move_along_dir(idx=idx, dir=-self.TN[idx,:,0], dist=self.length[idx]/2)
 
                 if self.dist2center_min[idx] <= self.dist2center_max[idx]:
-                    # print('Resolved in attempt 6')
                     continue
 
-                print('Issue not resolved')
+                # print('Issue not resolved')
                 if idx == prev_idx:
                     count += 1
                     if count >= 3:
@@ -343,23 +380,30 @@ class CIRCUIT:
             self.dist2center_min = np.delete(self.dist2center_min, idx)
             self.dist2center_max = np.delete(self.dist2center_max, idx)
             self.Nsegments -= 1
-            self.update_checkpoint(idx)
-            print('Checkpoint',idx,'was deleted from the circuit.')
+            self.update_checkpoint(idx%self.Nsegments)
+            # print('Checkpoint',idx,'was deleted from the circuit.')
 
-        def move_along_dir(self,idx,dir,minimal_separation=0,max_mov_dist=np.inf):
+        def move_along_dir(self,idx,dir,minimal_separation=0,dist=np.inf):
+            original = self.destination[idx]
+
             # What is the maximal distance over which we can move checkpoint idx in the direction dir?
-            if max_mov_dist==np.inf:
-                max_mov_dist = self.first_intersection(point=self.destination[idx], dir=dir, drop=[idx,(idx+1)%self.Nsegments]) - minimal_separation
+            max_mov_dist = np.maximum(self.first_intersection(point=self.destination[idx], dir=dir, drop=[idx,(idx+1)%self.Nsegments]) - minimal_separation, 0)
+            dist = np.minimum(dist, max_mov_dist)
             
-            self.update_checkpoint(idx, self.destination[idx] + max_mov_dist * dir)
+            self.update_checkpoint(idx, self.destination[idx] + dist * dir)
+
+            count = 0
             while not (self.first_intersection(point=self.destination[idx], dir=-self.TN[idx,:,0]                  , drop=[idx-1,idx,(idx+1)%self.Nsegments]) > self.length[idx]     and 
                        self.first_intersection(point=self.destination[idx], dir=self.TN[(idx+1)%self.Nsegments,:,0], drop=[idx,(idx+1)%self.Nsegments,(idx+2)%self.Nsegments]) > self.length[(idx+1)%self.Nsegments]):
-                self.update_checkpoint(idx, self.destination[idx] - max_mov_dist/6 * dir)
+                self.update_checkpoint(idx, self.destination[idx] - dist/5 * dir)
+                count += 1
+                if count >= 5:
+                    self.destination[idx] = original
+                    break
          
         def first_intersection(self,point,dir,checkpoints=[],drop=[]):
             #Input: dir is a unit vector.
             #Output: the distance between point and the first intersection along point+lambda*dir for lambda>0.
-
             if len(checkpoints) == 0:
                 checkpoints = self.destination
 
@@ -390,8 +434,8 @@ class CAR:
         
         self.engine_efficiency          = get_value(quality[0], .2, .55) # scalar
         self.max_acceleration           = get_value(quality[1], 2.25, 14.2) # m/s²
-        self.max_deceleration           = get_value(quality[3], 5., 45.) # m/s²
-        self.tank                       = get_value(quality[2], 0, 1)
+        self.max_deceleration           = get_value(quality[2], 5., 45.) # m/s²
+        self.tank                       = get_value(quality[3], 0, 1)
         self.grip_road                  = get_value(quality[4], .9*g, 1.5*g) # m/s² , friction_coeficient * g
         self.grip_grass                 = .55 * self.grip_road
         self.roll_resistance_coef_road  = get_value(quality[5], .03*g, .007*g)
@@ -414,9 +458,10 @@ class AGENT:
                                for layer in self.neural_network]
 
 class RACE:
-    def __init__(self,circuit,car,agents):
+    def __init__(self,circuit,car,laps,agents):
         self.circuit = circuit
         self.car = car
+        self.laps = laps
         self.Nagents = len(agents)
         self.state = RACE.STATE(Nagents=self.Nagents, circuit=self.circuit)
         self.neural_networks = [np.rollaxis(np.dstack([agent.neural_network[layer] for agent in agents]), -1)
@@ -438,7 +483,7 @@ class RACE:
                                             zorder = zorder))
         
             # Draw the plot onto a canvas
-            canvas = FigureCanvas(fig)
+            canvas = FigureCanvas(self.circuit.fig)
             canvas.draw()
 
             # Remove car_images for next iteration
@@ -453,14 +498,16 @@ class RACE:
             out.write(frame)
         
         if save:
+            self.circuit.plot()
+            ax = self.circuit.fig.get_axes()[0]
+
             # Initialise video
-            fourcc = cv2.VideoWriter_fourcc(*'MP4V')
+            fourcc = cv2.VideoWriter_fourcc(*'mp4v')
             out = cv2.VideoWriter(video_folder+'/output_video.mp4', fourcc, fps=video_speedup/dt, frameSize=frameSize)
-            fig,ax = self.circuit.plot()
             img = mpimg.imread('../Car.png')
             draw_cars_and_save_frame()
 
-        ### Simulation ###
+        finish_times = np.zeros(self.Nagents)
         numOfSteps = 100
         for tt in range(numOfSteps):
             # Determine the inputs to the neural networks, i.e. what the agent sees. (one vector for every agent)
@@ -477,14 +524,18 @@ class RACE:
                                             self.state.curvature_future]) # environment
                 # shape (Nagents,Ninputs)
 
-            # The agent determines which action to take
+            # The agents determine which action to take
             actions = self.get_actions(agent_states) # shape (Nagents,Nactions)
 
             # Simulate to get the new state
-            self.state.simulate(actions,dt,self.circuit,self.car)
+            self.state.simulate(actions,dt,self.circuit,self.car,self.laps)
 
             if save:
                 draw_cars_and_save_frame()
+            
+            # stop = self.stop_condition()
+            # finish_times[stop] = dt * tt
+            # self.remove_agents(stop)
 
         if save:
             out.release()
@@ -510,9 +561,10 @@ class RACE:
             self.omega = np.zeros(Nagents)                                    # shape Nagents
             self.health_tank = np.ones(Nagents)                               # shape Nagents
             self.health_tyres = np.ones(Nagents)                              # shape Nagents
-            self.laps = np.zeros(Nagents, dtype=int)                          # shape Nagents
 
             # Counters
+            self.stop = np.repeat(False, Nagents)                             # shape Nagents
+            self.laps = np.zeros(Nagents, dtype=int)                          # shape Nagents
             self.segment = np.zeros(Nagents, dtype=int)                       # shape Nagents
             self.reached_turning = np.repeat(False,Nagents)                   # shape Nagents
 
@@ -553,9 +605,10 @@ class RACE:
 
             self.velocity_local = np.matmul(self.velocity[:, np.newaxis, :], self.TN_local).squeeze()
 
-        def update_counters(self,circuit):
+        def update_counters(self,circuit,Nlaps):
             reached_next_checkpoint = self.position_local[:,0]>=0
             if np.any(reached_next_checkpoint):
+                any_change = True
                 self.segment[reached_next_checkpoint & self.reached_turning] += 1
                 self.reached_turning[reached_next_checkpoint] = np.logical_not(self.reached_turning[reached_next_checkpoint])
 
@@ -563,6 +616,7 @@ class RACE:
                 self.segment[finished_lap] = 0
                 self.laps[finished_lap] += 1
 
+                # Update lengths and curvatures of the future path
                 self.length_future[reached_next_checkpoint & ~self.reached_turning] = np.column_stack([self.length_future[reached_next_checkpoint & ~self.reached_turning, 1:], 
                                                                                                        circuit.length_turning[(self.segment[reached_next_checkpoint & ~self.reached_turning]+1) %circuit.Nsegments]])
                 self.length_future[reached_next_checkpoint & self.reached_turning] = np.column_stack([self.length_future[reached_next_checkpoint & self.reached_turning, 1:], 
@@ -571,14 +625,15 @@ class RACE:
                                                                                                           circuit.curvature[(self.segment[reached_next_checkpoint & ~self.reached_turning]+1) %circuit.Nsegments]])
                 self.curvature_future[reached_next_checkpoint & self.reached_turning] = np.column_stack([self.curvature_future[reached_next_checkpoint & self.reached_turning, 1:], 
                                                                                                          np.zeros(np.sum(reached_next_checkpoint & self.reached_turning))])
-                
-                print('\n segment:', self.segment, '\n reached_turning:', self.reached_turning)
-
-                return True # any_change = True
             else:
-                return False # any_change = False
+                any_change = False
 
-        def simulate(self,actions,dt,circuit,car):
+            self.stop[self.laps >= Nlaps] = True
+            self.stop[self.stop] = np.logical_or(self.position_local[self.stop,0] >= circuit.finish,
+                                                 self.segment[self.stop] > 0)
+            return any_change
+
+        def simulate(self,actions,dt,circuit,car,Nlaps):
             ### Derive the forces exerted by the road ###
             # Determine whether wheels are on road or grass
             car_Normal_local = np.matmul(np.transpose(self.TN_local,(0,2,1)), self.car_TN[:,:,1,np.newaxis]).squeeze() # shape (Nagents,2)
@@ -660,7 +715,7 @@ class RACE:
             any_change = True
             while any_change:
                 self.update_local(circuit)
-                any_change = self.update_counters(circuit)
+                any_change = self.update_counters(circuit,Nlaps)
 
 # Physical parameters
 g = 9.81 #[m/s²]
@@ -671,30 +726,30 @@ road_width = 12 #[meters]
 dt = 1/8
 video_speedup = 2
 
-frameSize = np.array([1280,720])
-# fig_size_pixels = (1920,1080) #[pixels]
-fig_size = np.array([12.8,7.2]) #[inches]
-circuit_width = 500 #[meters]
-ipm = fig_size[0]/circuit_width #inches per meter
-circuit_size = np.array([circuit_width, fig_size[1] /ipm]) #[meters]
+frameSize = (2000,1130) #[pixels]
+# frameSize = (1920,1080) #[pixels]
+fig_size = np.array([20, 11.3]) #[inches]
 car_size = np.array([5,2.5]) #[meters]
 wheel_rvectors = np.array([ [ car_size[0], car_size[1]], #front left wheel
                             [ car_size[0],-car_size[1]], #front right wheel
                             [-car_size[0], car_size[1]], #back left wheel
                             [-car_size[0],-car_size[1]]  #back right wheel
                             ]) /2                        #shape (4,2)
-moment_of_inertia_per_mass = (car_size[0]**2 + car_size[1]**2) /12 + car_size[0] * car_size[1] /8
+moment_of_inertia_per_mass = np.sum(car_size**2) /12 + np.sum(car_size) /8
 
-circuit = CIRCUIT(size=circuit_size,N=20)
+start = time.time()
+circuit = CIRCUIT(circuit_diagonal=500, N=20)
+end = time.time()
+print('circuit creation: ', end-start, 'seconds')
 # fig,ax = circuit.plot()
 # plt.show()
 
 agents = [AGENT(eps=1) for dummy in range(5)]
 car = CAR([1,1,1,1,1,1,1])
-race = RACE(circuit,car,agents)
+race = RACE(circuit,car=car,laps=1,agents=agents)
 
 start = time.time()
 race.simulate(save=True)
 end = time.time()
 
-print('time: ', end-start)
+print('race simulation: ', end-start, 'seconds')
