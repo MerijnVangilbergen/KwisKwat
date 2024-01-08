@@ -1,2 +1,2 @@
-- Derive distance_left instead of time_left
-- Program health
+- Add all car parameters to input
+- Decide size of neural network
