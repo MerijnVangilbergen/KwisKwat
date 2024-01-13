@@ -4,10 +4,12 @@ import matplotlib.image as mpimg
 import matplotlib.transforms as transforms
 from matplotlib.backends.backend_agg import FigureCanvasAgg as FigureCanvas
 import cv2
-import time
+# import time
+import pickle
+from datetime import datetime
 
 # Select folders
-video_folder = '../videos'
+output_folder = '../output'
 
 
 def vector2angle(vector):
@@ -128,9 +130,13 @@ class CIRCUIT:
         self.start = self.destination[0,:] + self.TN[0] @ np.array([-.8 * self.length[0], (road_width-car_size[1]) *np.random.uniform(-.5, .5)]) # shape (Nsegments,2)
         self.finish = -.2 * self.length[0] # This is the tangential component of the local position in segment[0]
 
-        temp = np.cumsum((self.length+self.length_turning)[::-1])
-        self.lap_distance = temp[-1]
-        self.distance_to_finish = temp[-2:1:-1] + (self.length[0]+self.finish)
+        temp = np.cumsum((self.length+self.length_turning)[::-1])[::-1]
+        print(N, temp)
+        self.lap_distance = temp[0]
+        temp = temp[1:]
+        print(temp)
+        self.distance_to_finish = temp + (self.length[0]+self.finish)
+
     
     def plot(self):
         ax = self.fig.get_axes()[0]
@@ -446,16 +452,20 @@ class CAR:
         self.roll_resistance_coef_road  = get_value(quality[6], .03*g, .007*g)
         self.roll_resistance_coef_grass = 3.58 * self.roll_resistance_coef_road
         drag_coefficient                = get_value(quality[7], 1.1, .7) #usually ranges between 0.7 to 1.1
-        air_density = 1.225 #[kg/m³]
-        frontal_area = 1.75 #[m²] around 1.5 to 2.0 square meters
-        self.air_resistance_coef = .5 * air_density * drag_coefficient * frontal_area
+        self.air_resistance_coef = .5 * 1.225 * 1.75 * drag_coefficient
+            # air_density = 1.225 kg/m³
+            # frontal_area = 1.75 m²
+            # frontal_area = 1.75 m² around 1.5 to 2.0 square meters
+
+        self.fixed_parameters = np.array([self.engine_efficiency, self.max_acceleration, self.max_deceleration, self.tank, self.grip_road, self.tyre_max_dist, self.roll_resistance_coef_road, self.air_resistance_coef])
 
 class AGENT:
     def __init__(self,eps=0):
-        layer1 = np.zeros((10,18))
-        layer2 = np.zeros((6,10))
-        layer3 = np.zeros((2,6))
-        self.neural_network = [layer1, layer2, layer3]
+        layer1 = np.zeros((12,25))
+        layer2 = np.zeros((8,12))
+        layer3 = np.zeros((5,8))
+        layer4 = np.zeros((2,5))
+        self.neural_network = [layer1, layer2, layer3, layer4]
         self.mutate(eps=eps)
     
     def mutate(self,eps):
@@ -476,7 +486,7 @@ class RACE:
         self.remaining_drivers = np.arange(self.Nagents)
         self.survivors = []
         
-    def simulate(self,save=False):
+    def simulate(self,saveas=''):
         def draw_cars_and_save_frame():
             # Draw the cars in the correct position and orientation
             car_images = []
@@ -506,13 +516,14 @@ class RACE:
             # Write the frame to the video
             out.write(frame)
         
+        save = saveas!=''
         if save:
             self.circuit.plot()
             ax = self.circuit.fig.get_axes()[0]
 
             # Initialise video
             fourcc = cv2.VideoWriter_fourcc(*'mp4v')
-            out = cv2.VideoWriter(video_folder+'/output_video.mp4', fourcc, fps=video_speedup/dt, frameSize=frameSize)
+            out = cv2.VideoWriter(saveas, fourcc, fps=video_speedup/dt, frameSize=frameSize)
             img = mpimg.imread('../Car.png')
             draw_cars_and_save_frame()
 
@@ -521,7 +532,7 @@ class RACE:
         while len(self.survivors) < self.Nsurvivors:
             # Determine the inputs to the neural networks, i.e. what the agent sees. (one vector for every agent)
             agent_states = np.column_stack([np.repeat(1,self.Nagents), # bias
-                                            np.repeat(self.car.tyre_max_dist,self.Nagents), # fixed car stats
+                                            np.tile(self.car.fixed_parameters,(self.Nagents,1)), # fixed car stats
                                             self.state.health_tank, # variable car stats
                                             self.state.tyres_deterioration, # variable car stats
                                             self.state.distance_to_finish,
@@ -775,19 +786,61 @@ frameSize = (2000,1130) #[pixels]
 fig_size = np.array([20, 11.3]) #[inches]
 
 
-start = time.time()
-circuit = CIRCUIT(circuit_diagonal=500, N=5)
-end = time.time()
-print('circuit creation: ', end-start, 'seconds')
+# start = time.time()
+# circuit = CIRCUIT(circuit_diagonal=500, N=5)
+# end = time.time()
+# print('circuit creation: ', end-start, 'seconds')
+
+# agents = [AGENT(eps=1) for dummy in range(50)]
+# car = CAR([1,1,1,1,1,1,1,1])
+# race = RACE(circuit,car=car,laps=1,agents=agents,survival_rate=.5,MaxTime=10)
+
+# start = time.time()
+# race.simulate(save=True)
+# end = time.time()
+# print('race simulation: ', end-start, 'seconds')
+
+# print(race.survivors)
 
 agents = [AGENT(eps=1) for dummy in range(50)]
-car = CAR([1,1,1,1,1,1,1,1])
-race = RACE(circuit,car=car,laps=1,agents=agents,survival_rate=.5,MaxTime=10)
+# file = open('important', 'rb')
+# data = pickle.load(file)
+# file.close()
 
-start = time.time()
-race.simulate(save=True)
-end = time.time()
+generation = 0
 
-print('race simulation: ', end-start, 'seconds')
+eps = 1
+Nsegments_min = 3
+Nsegments_max = 5
+MaxTime = 5
 
-print(race.survivors)
+while True:
+    circuit = CIRCUIT(circuit_diagonal=500, N=np.random.randint(Nsegments_min, Nsegments_max))
+    print(circuit.Nsegments)
+    print(circuit.distance_to_finish)
+    for dummy in range(3):
+        car = CAR(np.random.uniform(0,1,8))
+        race = RACE(circuit=circuit,car=car,laps=1,agents=agents,survival_rate=.5,MaxTime=MaxTime)
+        save = generation%100 == 0
+        if save:
+            current_datetime = datetime.now()
+            date_string = current_datetime.strftime("%Y%m%d_%H%M")
+            filename = date_string + '_gen' + str(generation)
+            file = open(output_folder+'/'+filename, 'wb')
+            pickle.dump(agents, file)
+            file.close()
+            race.simulate(saveas=output_folder+'/'+filename+'.mp4')
+
+            MaxTime *= 2
+            # Nsegments_max += 1
+        else:
+            race.simulate()
+
+        agents = [agents[sv] for sv in race.survivors]
+        new_agents = agents
+        for agent in new_agents:
+            agent.mutate(eps)
+        agents = agents + new_agents
+
+        generation += 1
+        print(generation)
