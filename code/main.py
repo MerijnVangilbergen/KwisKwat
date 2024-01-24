@@ -4,9 +4,12 @@ import matplotlib.image as mpimg
 import matplotlib.transforms as transforms
 from matplotlib.backends.backend_agg import FigureCanvasAgg as FigureCanvas
 import cv2
-# import time
+import time
 import pickle
 from datetime import datetime
+import copy
+import time
+import math
 
 # Select folders
 output_folder = '../output'
@@ -70,7 +73,9 @@ def to_frame(vector,frame_TN):
     
 
 class CIRCUIT:
-    def __init__(self,circuit_diagonal,N):
+    def __init__(self,circuit_diagonal,N,Nturns=None,start_coordinates=np.array([-.8,0])):
+        assert N > 3 # For N=3, an infinite loop may/will occur in the untangle_knot function.
+
         # Create figure
         self.fig = plt.figure(figsize=fig_size)
         ax = self.fig.add_axes([0, 0, 1, 1])
@@ -88,8 +93,17 @@ class CIRCUIT:
             # This number is solely used for line_widths in the circuit plot. The factor .87 is a manual correction based on visual results.
         self.size = ax_size / ipm #circuit_size [meters]
 
+        # Close the figure
+        plt.close(self.fig)
+
         # Construct a primitive circuit (random choices) and copy the data
-        primitive = self.PRIMITIVE_CIRCUIT(self.size,N)
+        while True:
+            try:
+                primitive = self.PRIMITIVE_CIRCUIT(self.size,N)
+                break
+            except Exception as e:
+                print(e)
+
         self.Nsegments = primitive.Nsegments
         self.destination = primitive.destination
         self.TN = primitive.TN
@@ -127,17 +141,19 @@ class CIRCUIT:
 
         # Select start and finish
         # The start line and finish line are always in segment[0].
-        self.start = self.destination[0,:] + self.TN[0] @ np.array([-.8 * self.length[0], (road_width-car_size[1]) *np.random.uniform(-.5, .5)]) # shape (Nsegments,2)
+        if Nturns is None:
+            self.start_segment = 0
+        else:
+            self.start_segment = int(self.Nsegments - Nturns)
+        self.start = self.destination[self.start_segment,:] + self.TN[0] @ (start_coordinates * np.array([self.length[self.start_segment], road_width])) # shape (Nsegments,2)
         self.finish = -.2 * self.length[0] # This is the tangential component of the local position in segment[0]
 
-        temp = np.cumsum((self.length+self.length_turning)[::-1])[::-1]
-        print(N, temp)
+        temp = self.length + self.length_turning
+        temp = np.cumsum(temp[::-1])[::-1] # backward cumsum
         self.lap_distance = temp[0]
-        temp = temp[1:]
-        print(temp)
-        self.distance_to_finish = temp + (self.length[0]+self.finish)
-
-    
+        temp = np.concatenate((temp[1:], [0]))
+        self.distance_to_finish = temp + (self.length[0] + self.finish)
+        
     def plot(self):
         ax = self.fig.get_axes()[0]
 
@@ -171,6 +187,9 @@ class CIRCUIT:
     
     class PRIMITIVE_CIRCUIT:
         def __init__(self,size,N):
+            max_execution_time = 10
+            start_primitive = time.time()
+
             self.size = size
             self.Nsegments = N
             self.select_checkpoints(size,minimal_separation=5*road_width)
@@ -195,6 +214,8 @@ class CIRCUIT:
             while any_change:
                 self.resolve_overlap(minimal_separation=2*road_width)
                 any_change = self.untangle_knot()
+                if time.time()-start_primitive > max_execution_time:
+                    raise Exception("The initialisation of the primitive circuit was terminated because it took longer than", max_execution_time, "seconds.")
             # self.plot()
 
             while np.any(self.dist2center_min > self.dist2center_max):
@@ -203,6 +224,8 @@ class CIRCUIT:
                 while any_change:
                     self.resolve_overlap(minimal_separation=1.5*road_width)
                     any_change = self.untangle_knot()
+                    if time.time()-start_primitive > max_execution_time:
+                        raise Exception("The initialisation of the primitive circuit was terminated because it took longer than", max_execution_time, "seconds.")
             # self.plot()
         
         def select_checkpoints(self,size,minimal_separation):
@@ -211,10 +234,14 @@ class CIRCUIT:
                                                             np.random.uniform(road_width/2, size[1]-road_width/2, self.Nsegments)]) ])
             # Replace points that are too close to each other
             for ii in range(self.Nsegments):
+                attempts = 0
                 while True:
                     separation = np.linalg.norm(self.destination[ii]-self.destination[:ii],axis=1)
+                    if attempts >= 100:
+                        raise Exception("The function select_checkpoints was terminated because it took longer than 100 attempts to find a suitable location for a checkpoint.")
                     if np.any(separation < minimal_separation):
                         self.destination[ii] = [np.random.uniform(0,size[0]), np.random.uniform(0,size[1])]
+                        attempts += 1
                     else:
                         break
 
@@ -224,11 +251,13 @@ class CIRCUIT:
             plt.show()
 
         def untangle_knot(self):
-            # print('Untangling knot')
+            start_untangle = time.time()
             any_change = False
             ii = 0
             jj = self.Nsegments-2
             while ii < self.Nsegments-2:
+                if time.time()-start_untangle > 1:
+                    raise Exception("The function untangling_knot was terminated because it took longer than one second.")
                 # Check for intersection:
                 # Find lambda1 and lambda2 such that checkpoint[ii]-lambda0*dir[ii] = checkpoint[jj]-lambda1*dir[jj]
                 # Intersection found if both lambda0 and lambda1 are within the interval [0,1]
@@ -257,9 +286,9 @@ class CIRCUIT:
                     # No intersection found between segments ii and jj. Next, we look for an intersection between segments ii and jj-1.
                     jj -= 1
             return any_change
+            
 
         def resolve_overlap(self,minimal_separation):
-            # print('Resolving overlap')
             # Input: The destination must be ordered in a way that there are no intersections.
             # Taking into account the road width, some line segments may overlap. Any such occurrences are resolved by moving at least one check_point away from a line segment.
             any_change = True
@@ -293,7 +322,6 @@ class CIRCUIT:
                         self.remove_checkpoint(idx=last_jj)
         
         def resolve_turning_issues(self):
-            # print('Resolving turning issues')
             prev_idx = -1
             count = 0
             while np.any(self.dist2center_min > self.dist2center_max):
@@ -442,35 +470,34 @@ class CAR:
         def get_value(coordinate,min,max):
             return min + coordinate*(max-min)
         
-        self.engine_efficiency          = get_value(quality[0], .2, .55) # scalar
-        self.max_acceleration           = get_value(quality[1], 2.25, 14.2) # m/s²
-        self.max_deceleration           = get_value(quality[2], 5., 45.) # m/s²
-        self.tank                       = get_value(quality[3], 1e5, 1e6) # J , max 110 liter & 12.889 Wh/liter -> max 3.96e8 Joule
-        self.grip_road                  = get_value(quality[4], .9*g, 1.5*g) # m/s² , friction_coeficient * g
-        self.grip_grass                 = .55 * self.grip_road
-        self.tyre_max_dist              = get_value(quality[5], 2e5, 4e5) # km
-        self.roll_resistance_coef_road  = get_value(quality[6], .03*g, .007*g)
-        self.roll_resistance_coef_grass = 3.58 * self.roll_resistance_coef_road
-        drag_coefficient                = get_value(quality[7], 1.1, .7) #usually ranges between 0.7 to 1.1
+        self.engine_efficiency     = get_value(quality[0], .2, .55) # scalar
+        self.max_acceleration      = get_value(quality[1], 2.25, 14.2) # m/s²
+        self.max_deceleration      = get_value(quality[2], 5., 45.) # m/s²
+        self.tank                  = get_value(quality[3], 1e5, 1e6) # J , max 110 liter & 12.889 Wh/liter -> max 3.96e8 Joule
+        self.grip                  = get_value(quality[4], .9*g, 1.5*g) # m/s² , friction_coeficient * g
+        self.tyre_max_dist         = get_value(quality[5], 2e5, 4e5) # km
+        self.roll_resistance_coef  = get_value(quality[6], .03*g, .007*g)
+        drag_coefficient           = get_value(quality[7], 1.1, .7) #usually ranges between 0.7 to 1.1
         self.air_resistance_coef = .5 * 1.225 * 1.75 * drag_coefficient
             # air_density = 1.225 kg/m³
             # frontal_area = 1.75 m²
             # frontal_area = 1.75 m² around 1.5 to 2.0 square meters
 
-        self.fixed_parameters = np.array([self.engine_efficiency, self.max_acceleration, self.max_deceleration, self.tank, self.grip_road, self.tyre_max_dist, self.roll_resistance_coef_road, self.air_resistance_coef])
+        self.fixed_parameters = np.array([self.engine_efficiency, self.max_acceleration, self.max_deceleration, self.tank, self.grip, self.tyre_max_dist, self.roll_resistance_coef, self.air_resistance_coef])
 
 class AGENT:
-    def __init__(self,eps=0):
-        layer1 = np.zeros((12,25))
-        layer2 = np.zeros((8,12))
-        layer3 = np.zeros((5,8))
-        layer4 = np.zeros((2,5))
-        self.neural_network = [layer1, layer2, layer3, layer4]
-        self.mutate(eps=eps)
+    def __init__(self,eps=0,generation=0):
+        Nneurons = [16,12,10,8,5,3] # bias term included
+        self.neural_network = []
+        for ii in range(len(Nneurons)-1):
+            self.neural_network.append(np.zeros((Nneurons[ii+1]-1,Nneurons[ii])))
+        self.generation = generation
+        self.mutate(eps=eps, generation=generation)
     
-    def mutate(self,eps):
+    def mutate(self,eps,generation):
         self.neural_network = [layer + np.random.uniform(-eps,eps,np.shape(layer))
                                for layer in self.neural_network]
+        self.generation = generation
 
 class RACE:
     def __init__(self,circuit,car,laps,agents,survival_rate,MaxTime):
@@ -479,19 +506,20 @@ class RACE:
         self.laps = laps
         self.MaxTime = MaxTime
         self.Nagents = len(agents)
-        self.state = RACE.STATE(Nagents=self.Nagents, circuit=self.circuit,Nlaps=self.laps)
+        self.state = RACE.STATE(Nagents=self.Nagents, circuit=self.circuit, Nlaps=self.laps)
         self.neural_networks = [np.rollaxis(np.dstack([agent.neural_network[layer] for agent in agents]), -1)
                                 for layer in range(len(agents[0].neural_network))] # shape (Nlayers,Nagents,Ncols,Nrows)
         self.Nsurvivors = int(survival_rate*self.Nagents)
-        self.remaining_drivers = np.arange(self.Nagents)
+        self.remaining_drivers = np.arange(self.Nagents, dtype=int)
         self.survivors = []
+        self.Nfinishers = 1
         
     def simulate(self,saveas=''):
         def draw_cars_and_save_frame():
             # Draw the cars in the correct position and orientation
             car_images = []
             zorder = max(artist.get_zorder() for artist in ax.get_children())
-            for aa in range(min(self.Nagents,50)):
+            for aa in range(min(self.Nagents,25)):
                 zorder += 1
                 p = self.state.position[[aa],:].T # This is a 2*1 column array
                 TN = self.state.car_TN[aa]        # This is a 2*2 array
@@ -527,22 +555,29 @@ class RACE:
             img = mpimg.imread('../Car.png')
             draw_cars_and_save_frame()
 
-        MaxSteps = self.MaxTime / dt
+        MaxSteps = int(self.MaxTime / dt)
         tt = 0
+        abandoned_distance_to_finish = dict()
         while len(self.survivors) < self.Nsurvivors:
             # Determine the inputs to the neural networks, i.e. what the agent sees. (one vector for every agent)
-            agent_states = np.column_stack([np.repeat(1,self.Nagents), # bias
-                                            np.tile(self.car.fixed_parameters,(self.Nagents,1)), # fixed car stats
-                                            self.state.health_tank, # variable car stats
+            # agent_states = np.column_stack([np.tile(self.car.fixed_parameters,(self.Nagents,1)), # fixed car stats
+            #                                 self.state.health_tank, # variable car stats
+            #                                 self.state.tyres_deterioration, # variable car stats
+            #                                 self.state.distance_to_finish,
+            #                                 self.state.position_local, # position (environment)
+            #                                 self.state.velocity_local, # velocity
+            #                                 self.state.orientation_local, # orientation (environment)
+            #                                 self.state.omega, # rotational speed
+            #                                 self.state.length_future, # environment
+            #                                 self.state.curvature_future]) # environment
+            agent_states = np.column_stack([self.state.health_tank, # variable car stats
                                             self.state.tyres_deterioration, # variable car stats
-                                            self.state.distance_to_finish,
                                             self.state.position_local, # position (environment)
                                             self.state.velocity_local, # velocity
-                                            angle_minus(self.state.orientation,self.circuit.orientation[self.state.segment]), # orientation (environment)
+                                            self.state.orientation_local, # orientation (environment)
                                             self.state.omega, # rotational speed
                                             self.state.length_future, # environment
-                                            self.state.curvature_future]) # environment
-                # shape (Nagents,Ninputs)
+                                            self.state.curvature_future]) # environment                # shape (Nagents,Ninputs)
 
             # The agents determine which action to take
             actions = self.get_actions(agent_states) # shape (Nagents,Nactions)
@@ -555,20 +590,28 @@ class RACE:
             
             finished = self.state.distance_to_finish <= 0
             if np.any(finished):
-                new_survivors = self.remaining_drivers[np.where(finished)[0]]
-                self.survivors.extend(new_survivors)
+                self.survivors.extend(self.remaining_drivers[np.where(finished)[0]])
                 self.remove_agents(finished)
+            
+            abandoned = np.logical_or(np.abs(self.state.position_local[:,1]) > road_width/2,
+                                      np.abs(self.state.orientation_local) > np.pi/2)
+            if np.any(abandoned):
+                for idx in np.where(abandoned)[0]:
+                    abandoned_distance_to_finish[self.remaining_drivers[idx]] = self.state.distance_to_finish[idx]
+                self.remove_agents(abandoned)
 
             tt += 1
-            if tt == MaxSteps:
+            if tt >= MaxSteps or len(self.remaining_drivers) <= 1:
+                self.Nfinishers = len(self.survivors) / self.Nsurvivors
                 # The number of survivors is less than required. Therefore, the ones that are closest to the finish also survive.
-                drivers = self.remaining_drivers
-                distance_to_finish = self.state.distance_to_finish
+                drivers = np.concatenate((self.remaining_drivers, np.array(list(abandoned_distance_to_finish.keys()))))
+                score = np.concatenate((self.state.distance_to_finish, np.array(list(abandoned_distance_to_finish.values()))))
+
                 while len(self.survivors) < self.Nsurvivors:
-                    idx = np.argmin(distance_to_finish)
-                    self.survivors.append(drivers[idx])
+                    idx = np.argmin(score)
+                    self.survivors.append(int(drivers[idx]))
                     drivers = np.delete(drivers, idx)
-                    distance_to_finish = np.delete(distance_to_finish, idx)
+                    score = np.delete(score, idx)
                 break
 
         if save:
@@ -580,9 +623,11 @@ class RACE:
         
         # Input has shape (Nagents, Ninputs)
         # The layers have shape (Nagents, Noutputs, Ninputs)
-        output = input[:,:,np.newaxis]
+        bias = np.repeat(1,self.Nagents)
+        output = input
         for layer in self.neural_networks:
-            output = sigmoid(np.matmul(layer, output))
+            input = np.column_stack((bias, output)) # environment
+            output = sigmoid(np.matmul(layer, input[:,:,np.newaxis]).squeeze())
         output =  2*output.squeeze() - 1 # All in the interval [-1,1]
         return output
     
@@ -596,7 +641,7 @@ class RACE:
         def __init__(self,Nagents,circuit,Nlaps):
             self.position = np.repeat([circuit.start], Nagents, axis=0)       # shape (Nagents,2)
             self.velocity = np.zeros((Nagents, 2))                            # shape (Nagents,2)
-            self.orientation = np.repeat(circuit.orientation[0], Nagents)     # shape Nagents
+            self.orientation = np.repeat(circuit.orientation[circuit.start_segment], Nagents) # shape Nagents
             self.car_TN = get_TN_from_angle(self.orientation)                 # shape (Nagents,2,2)
             self.omega = np.zeros(Nagents)                                    # shape Nagents
             self.health_tank = np.repeat(car.tank, Nagents)                   # shape Nagents
@@ -604,17 +649,18 @@ class RACE:
 
             # Counters
             self.laps = np.zeros(Nagents, dtype=int)                          # shape Nagents
-            self.segment = np.zeros(Nagents, dtype=int)                       # shape Nagents
+            self.segment = np.repeat(circuit.start_segment, Nagents)          # shape Nagents
             self.reached_turning = np.repeat(False,Nagents)                   # shape Nagents
 
             # Local state
             self.position_local = np.zeros((Nagents,2))                       # shape (Nagents,2)
             self.velocity_local = np.zeros((Nagents,2))                       # shape (Nagents,2)
+            self.orientation_local = np.zeros(Nagents)                        # shape Nagents
             self.TN_local = np.zeros((Nagents,2,2))                           # shape (Nagents,2,2)
             self.update_local(circuit)
 
             # Agent states
-            self.distance_to_finish = -self.position_local[:,0] + circuit.distance_to_finish[self.segment] + (Nlaps-self.laps-1) * circuit.lap_distance # shape Nagents
+            self.distance_to_finish = np.maximum(0,-self.position_local[:,0]) + circuit.distance_to_finish[self.segment] + (Nlaps-self.laps-1) * circuit.lap_distance # shape Nagents
             self.distance_to_finish[~self.reached_turning] += circuit.length_turning[self.segment[~self.reached_turning]]
             self.length_future = np.zeros((Nagents, 3))                       # shape (Nagents,3)
             self.curvature_future = np.zeros((Nagents, 4))                    # shape (Nagents,4)
@@ -635,19 +681,21 @@ class RACE:
             # Express position and velocity in local coordinates
             self.TN_local[np.logical_not(self.reached_turning)] = circuit.TN[self.segment[np.logical_not(self.reached_turning)]]
             disp_from_center = self.position[self.reached_turning] - circuit.center[self.segment[self.reached_turning]]
-            dist_from_center = -np.sign(circuit.radius[self.segment[self.reached_turning]]) * np.linalg.norm(disp_from_center, axis=1)
-            self.TN_local[self.reached_turning,:,1] = disp_from_center / dist_from_center[:,np.newaxis]
+            dist_from_center = np.linalg.norm(disp_from_center, axis=1)
+            self.TN_local[self.reached_turning,:,1] = disp_from_center / (-np.sign(circuit.curvature[self.segment[self.reached_turning]]) * dist_from_center)[:,np.newaxis]
             self.TN_local[self.reached_turning,0,0] = self.TN_local[self.reached_turning,1,1] #Tx = Ny
             self.TN_local[self.reached_turning,1,0] = -self.TN_local[self.reached_turning,0,1] #Ty = -Nx
 
             self.position_local[np.logical_not(self.reached_turning)] = np.matmul((self.position[np.logical_not(self.reached_turning)]-circuit.destination[self.segment[np.logical_not(self.reached_turning)],:])[:, np.newaxis, :], self.TN_local[np.logical_not(self.reached_turning)]).squeeze()
-            self.position_local[self.reached_turning,1] = dist_from_center - circuit.radius[self.segment[self.reached_turning]]
-            self.position_local[self.reached_turning,0] = angle_minus(vector2angle(disp_from_center), circuit.angle_final[self.segment[self.reached_turning]]) / circuit.angle_change[self.segment[self.reached_turning]]
+            self.position_local[self.reached_turning,1] = -np.sign(circuit.curvature[self.segment[self.reached_turning]]) * (dist_from_center - circuit.radius[self.segment[self.reached_turning]])
+            self.position_local[self.reached_turning,0] = circuit.radius[self.segment[self.reached_turning]] * angle_minus(vector2angle(disp_from_center), circuit.angle_final[self.segment[self.reached_turning]]) * np.sign(circuit.angle_change[self.segment[self.reached_turning]])
 
             self.velocity_local = np.matmul(self.velocity[:, np.newaxis, :], self.TN_local).squeeze()
 
+            self.orientation_local = angle_minus(self.orientation, vector2angle(self.TN_local[:,:,0]))
+
         def update_counters(self,circuit):
-            reached_next_checkpoint = self.position_local[:,0]>=0
+            reached_next_checkpoint = np.logical_and(self.position_local[:,0] >= 0, np.abs(self.position_local[:,1]) <= road_width/2)
             if np.any(reached_next_checkpoint):
                 any_change = True
                 self.segment[reached_next_checkpoint & self.reached_turning] += 1
@@ -678,9 +726,11 @@ class RACE:
                 # car_Normal_local = TN_local.transpose() @ car_Normal
             wheels_Npos_local = self.position_local[:,np.newaxis,1] + np.tensordot(car_Normal_local[:,np.newaxis,:], wheel_rvectors[np.newaxis,:,:], axes=(2,2)).squeeze() #shape (Nagents,Nwheels)
                 # wheels_Npos_local = position_local[1] + np.dot(car_Normal_local, wheel_rvector)
+            
             mask_offroad = np.abs(wheels_Npos_local) > road_width/2 #shape (Nagents,Nwheels)
-            grip = np.where(mask_offroad, car.grip_grass, car.grip_road) / (1+self.tyres_deterioration[:,np.newaxis]**2) #shape (Nagents,Nwheels)
-            roll_resistance_coef = np.where(mask_offroad, car.roll_resistance_coef_grass, car.roll_resistance_coef_road)
+            grip = np.repeat(car.grip / (1+self.tyres_deterioration[:,np.newaxis]**2), 4, axis=1) #shape (Nagents,Nwheels)
+            grip[mask_offroad] *= offroad_grip_multiplyer
+            roll_resistance_coef = np.where(mask_offroad, car.roll_resistance_coef * offroad_roll_resistance_multiplyer, car.roll_resistance_coef)
 
             # Determine the desired tangential acceleration and the fuel usage
             action_acceleration = actions[:,0]
@@ -688,7 +738,7 @@ class RACE:
             positive_acceleration = action_acceleration > 0
             acceleration_linear = np.where(positive_acceleration, action_acceleration * car.max_acceleration, 
                                                                   action_acceleration * car.max_deceleration)
-            efficiency = np.where(positive_acceleration, car.engine_efficiency * (1-np.exp(action_acceleration-1)) / (1-np.exp(-1)), np.inf)
+            efficiency = np.maximum(1e-10, np.where(positive_acceleration, car.engine_efficiency * (1-np.exp(action_acceleration-1)) / (1-np.exp(-1)), np.inf))
                 # efficiency = base_efficiency * (1 - exp(acceleration / max_acceleration))
             self.health_tank -= acceleration_linear * np.linalg.norm(self.velocity,axis=1) / efficiency * dt
                 # Energy consumption = int(F*v)*dt
@@ -717,7 +767,7 @@ class RACE:
                 # speed - dt*acceleration = 0, so maximal acceleration along wheel normal = -(wheel speed along wheel normal) /dt
             acc_norm = np.linalg.norm(acceleration_surface,axis=-1) # shape (Nagents,Nwheels)
             drift = acc_norm > grip
-            acceleration_surface[drift, :] *= (grip[drift, np.newaxis]*drift_multiplyer / acc_norm[drift, np.newaxis])
+            acceleration_surface[drift, :] *= (grip[drift, np.newaxis]*drift_grip_multiplyer / acc_norm[drift, np.newaxis])
             self.tyres_deterioration -= dt / car.tyre_max_dist * np.mean(wheel_velocity[:,:,0] * (1+drift*drift_deterioration_multiplyer), axis=1)
 
             # Prevent driving backwards
@@ -756,16 +806,15 @@ class RACE:
             while any_change:
                 self.update_local(circuit)
                 any_change = self.update_counters(circuit)
-            self.distance_to_finish = -self.position_local[:,0] + circuit.distance_to_finish[self.segment] + (Nlaps-self.laps-1) * circuit.lap_distance
+            self.distance_to_finish = np.maximum(0,-self.position_local[:,0]) + circuit.distance_to_finish[self.segment] + (Nlaps-self.laps-1) * circuit.lap_distance
             self.distance_to_finish[~self.reached_turning] += circuit.length_turning[self.segment[~self.reached_turning]]
         
         def remove_agents(self,mask):
             for attr in self.__dict__:
                 setattr(self, attr, getattr(self, attr)[~mask])
 
-
 # Size parameters
-road_width = 12 #[meters]
+road_width = 10 #[meters]
 car_size = np.array([5,2.5]) #[meters]
 wheel_rvectors = np.array([ [ car_size[0], car_size[1]], #front left wheel
                             [ car_size[0],-car_size[1]], #front right wheel
@@ -776,7 +825,9 @@ wheel_rvectors = np.array([ [ car_size[0], car_size[1]], #front left wheel
 # Physical parameters
 dt = 1/8 #[s]
 g = 9.81 #[m/s²]
-drift_multiplyer = .85
+drift_grip_multiplyer = .85
+offroad_grip_multiplyer = .55
+offroad_roll_resistance_multiplyer = 50
 moment_of_inertia_per_mass = np.sum(car_size**2) /12 + np.sum(car_size) /8
 drift_deterioration_multiplyer = 20
 
@@ -790,6 +841,8 @@ fig_size = np.array([20, 11.3]) #[inches]
 # circuit = CIRCUIT(circuit_diagonal=500, N=5)
 # end = time.time()
 # print('circuit creation: ', end-start, 'seconds')
+# # circuit.plot()
+# # plt.show()
 
 # agents = [AGENT(eps=1) for dummy in range(50)]
 # car = CAR([1,1,1,1,1,1,1,1])
@@ -802,45 +855,71 @@ fig_size = np.array([20, 11.3]) #[inches]
 
 # print(race.survivors)
 
-agents = [AGENT(eps=1) for dummy in range(50)]
-# file = open('important', 'rb')
-# data = pickle.load(file)
+
+
+
+racenum = 0
+generation = 0
+eps = 1
+
+Nsegments_min = 4
+Nsegments_max = 6
+Nturns = 1 # The number of turns that need to be taken by the agents
+start_coordinates_min = np.array([-.05,-.05])
+start_coordinates_max = np.array([0,.05])
+MaxTime = 50
+
+Nagents = 5000
+survival_rate = .95
+agents = [AGENT(eps=eps) for dummy in range(Nagents)]
+# file = open('../output/20240121_1309_gen200', 'rb')
+# agents = pickle.load(file)
 # file.close()
 
-generation = 0
-
-eps = 1
-Nsegments_min = 3
-Nsegments_max = 5
-MaxTime = 5
+# car = CAR(np.random.uniform(0,1,8))
+car = CAR(np.repeat(.7,8))
 
 while True:
-    circuit = CIRCUIT(circuit_diagonal=500, N=np.random.randint(Nsegments_min, Nsegments_max))
-    print(circuit.Nsegments)
-    print(circuit.distance_to_finish)
-    for dummy in range(3):
-        car = CAR(np.random.uniform(0,1,8))
-        race = RACE(circuit=circuit,car=car,laps=1,agents=agents,survival_rate=.5,MaxTime=MaxTime)
-        save = generation%100 == 0
-        if save:
-            current_datetime = datetime.now()
-            date_string = current_datetime.strftime("%Y%m%d_%H%M")
-            filename = date_string + '_gen' + str(generation)
-            file = open(output_folder+'/'+filename, 'wb')
-            pickle.dump(agents, file)
-            file.close()
-            race.simulate(saveas=output_folder+'/'+filename+'.mp4')
+    Nsegments = np.random.randint(Nsegments_min, Nsegments_max)
+    circuit = CIRCUIT(circuit_diagonal=np.random.uniform(200,350), N=Nsegments, Nturns=Nturns, start_coordinates=np.random.uniform(start_coordinates_min,start_coordinates_max))
+    race = RACE(circuit=circuit,car=car,laps=1,agents=agents,survival_rate=survival_rate,MaxTime=MaxTime)
 
-            MaxTime *= 2
-            # Nsegments_max += 1
-        else:
-            race.simulate()
+    save = racenum == 0
+    if save:
+        current_datetime = datetime.now()
+        date_string = current_datetime.strftime("%Y%m%d_%H%M")
+        filename = date_string + '_gen' + str(generation)
+        file = open(output_folder+'/'+filename, 'wb')
+        pickle.dump(agents, file)
+        file.close()
+        start = time.time()
+        race.simulate(saveas=output_folder+'/'+filename+'.mp4')
+        time_race = time.time() - start
+    else:
+        start = time.time()
+        race.simulate()
+        time_race = time.time() - start
 
-        agents = [agents[sv] for sv in race.survivors]
-        new_agents = agents
+    print(f"race={racenum}, time_simulation={time_race}, Nagents={len(agents)}, Nfinishers={race.Nfinishers}")
+    agents = [agents[sv] for sv in race.survivors]
+    racenum += 1
+
+    if len(agents) < Nagents:
+        generation += 1
+        racenum = 0
+        # new_agents = copy.deepcopy(agents * math.ceil(Nagents/len(agents) - 1))
+        new_agents = copy.deepcopy(agents)
         for agent in new_agents:
-            agent.mutate(eps)
+            agent.mutate(eps, generation=generation)
         agents = agents + new_agents
 
-        generation += 1
-        print(generation)
+        age = generation - np.asarray([agent.generation for agent in agents])
+        numOfAge1 = np.mean(age==1)
+        print(f"gen={generation}, Nage1={numOfAge1}, survival_rate={survival_rate}, eps={eps}")
+
+        # if numOfAge1 < survival_rate**2/10 and eps>1e-10:
+        #     eps *= .9
+        # elif numOfAge1 > survival_rate**2/2 and eps<1:
+        #     eps *= 1.1
+        # elif numOfAge1 < .01 and survival_rate>2/Nagents:
+        #     survival_rate *= .99

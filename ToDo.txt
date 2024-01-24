@@ -1,3 +1,3 @@
-- Check circuit.distance_to_finish
-- Find infinite loop and fix it
-- Check whether agents are copied or referenced upon creating the next generation
+For each race, define a score. Instead of dropping agents after every race, only drop agents with the worst scores at the end of a generation.
+Define MaxTime based on a minimum of 5 m/s
+Add neurons/layers in the process
