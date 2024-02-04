@@ -8,7 +8,6 @@ import time
 import pickle
 from datetime import datetime
 import copy
-import time
 import math
 
 # Select folders
@@ -102,7 +101,8 @@ class CIRCUIT:
                 primitive = self.PRIMITIVE_CIRCUIT(self.size,N)
                 break
             except Exception as e:
-                print(e)
+                # print(e)
+                pass
 
         self.Nsegments = primitive.Nsegments
         self.destination = primitive.destination
@@ -140,12 +140,12 @@ class CIRCUIT:
         self.orientation = vector2angle(self.TN[:,:,0]) # shape Nsegments
 
         # Select start and finish
-        # The start line and finish line are always in segment[0].
         if Nturns is None:
             self.start_segment = 0
         else:
             self.start_segment = int(self.Nsegments - Nturns)
-        self.start = self.destination[self.start_segment,:] + self.TN[0] @ (start_coordinates * np.array([self.length[self.start_segment], road_width])) # shape (Nsegments,2)
+        
+        self.start = self.destination[self.start_segment,:] + self.TN[self.start_segment] @ (start_coordinates * np.array([self.length[self.start_segment], road_width])) # shape (Nsegments,2)
         self.finish = -.2 * self.length[0] # This is the tangential component of the local position in segment[0]
 
         temp = self.length + self.length_turning
@@ -227,6 +227,8 @@ class CIRCUIT:
                     if time.time()-start_primitive > max_execution_time:
                         raise Exception("The initialisation of the primitive circuit was terminated because it took longer than", max_execution_time, "seconds.")
             # self.plot()
+            
+            self.translate_to_center()
         
         def select_checkpoints(self,size,minimal_separation):
             # Select uniformly distributed points in the rectangular area
@@ -464,6 +466,10 @@ class CIRCUIT:
                 return self.first_intersection(point=point, dir=dir, checkpoints=np.vstack([[0,0], [self.size[0],0], self.size, [0,self.size[1]]]))
             else:
                 return np.min(dist_to_intersection)
+        
+        def translate_to_center(self):
+            self.destination += (np.min(self.destination, axis=0) + np.max(self.destination, axis=0) - self.size)[np.newaxis,:]
+
 
 class CAR:
     def __init__(self,quality):
@@ -473,9 +479,9 @@ class CAR:
         self.engine_efficiency     = get_value(quality[0], .2, .55) # scalar
         self.max_acceleration      = get_value(quality[1], 2.25, 14.2) # m/s²
         self.max_deceleration      = get_value(quality[2], 5., 45.) # m/s²
-        self.tank                  = get_value(quality[3], 1e5, 1e6) # J , max 110 liter & 12.889 Wh/liter -> max 3.96e8 Joule
+        self.tank                  = get_value(quality[3], 1e5 / tank_unit, 1e7 / tank_unit) # max 110 liter & 12.889 Wh/liter -> max 3.96e8 Joule
         self.grip                  = get_value(quality[4], .9*g, 1.5*g) # m/s² , friction_coeficient * g
-        self.tyre_max_dist         = get_value(quality[5], 2e5, 4e5) # km
+        self.tyre_max_dist         = get_value(quality[5], 1e5, 4e5) # km
         self.roll_resistance_coef  = get_value(quality[6], .03*g, .007*g)
         drag_coefficient           = get_value(quality[7], 1.1, .7) #usually ranges between 0.7 to 1.1
         self.air_resistance_coef = .5 * 1.225 * 1.75 * drag_coefficient
@@ -483,11 +489,14 @@ class CAR:
             # frontal_area = 1.75 m²
             # frontal_area = 1.75 m² around 1.5 to 2.0 square meters
 
-        self.fixed_parameters = np.array([self.engine_efficiency, self.max_acceleration, self.max_deceleration, self.tank, self.grip, self.tyre_max_dist, self.roll_resistance_coef, self.air_resistance_coef])
-
 class AGENT:
-    def __init__(self,eps=0,generation=0):
-        Nneurons = [16,12,10,8,5,3] # bias term included
+    def __init__(self,include_car_vars,include_state_vars,eps=0,generation=0):
+        Ninputs = (   len([attr for attr in include_car_vars.keys() if include_car_vars[attr]==True]) # number of 1-dimensional car variables
+                    + np.sum([np.sum(include_car_vars[attr]) for attr in include_car_vars.keys() if isinstance(include_car_vars[attr], list)]) # number of dimensions from higher dimensional car variables
+                    + len([attr for attr in include_state_vars.keys() if include_state_vars[attr]==True]) # number of 1-dimensional state variables
+                    + np.sum([np.sum(include_state_vars[attr]) for attr in include_state_vars.keys() if isinstance(include_state_vars[attr], list)]) ) # number of dimensions from higher dimensional state variables
+        Nlayers = 4
+        Nneurons = np.round(np.linspace(Ninputs+1, 2+1, Nlayers, dtype=int)) # bias term included
         self.neural_network = []
         for ii in range(len(Nneurons)-1):
             self.neural_network.append(np.zeros((Nneurons[ii+1]-1,Nneurons[ii])))
@@ -498,9 +507,38 @@ class AGENT:
         self.neural_network = [layer + np.random.uniform(-eps,eps,np.shape(layer))
                                for layer in self.neural_network]
         self.generation = generation
+    
+    # def add_layer(self):
+    #     Ninputs = len(self.neural_network[0]) - 1
+    #     Nlayers = len(self.neural_network) + 1
+    #     Nneurons = np.round(np.linspace(Ninputs+1, 2+1, Nlayers, dtype=int)) # bias term included
+    
+    def upgrade(self, include_car_vars_prev, include_state_vars_prev, include_car_vars, include_state_vars):
+        # Upgrade the neural network to include new variables.
+        previous_neural_network = self.neural_network
+
+        include_booleans_prev = np.array([True], dtype=bool) # bias term included
+        for incl in list(include_car_vars_prev.values()) + list(include_state_vars_prev.values()):
+            include_booleans_prev = np.append(include_booleans_prev, incl)
+
+        include_booleans = np.array([True], dtype=bool) # bias term included
+        for incl in list(include_car_vars.values()) + list(include_state_vars.values()):
+            include_booleans = np.append(include_booleans, incl)
+        
+        Ninputs = np.sum(include_booleans) # bias term included
+        Nlayers = len(previous_neural_network) + 1
+        Nneurons = np.round(np.linspace(Ninputs, 2+1, Nlayers, dtype=int)) # bias term included
+        self.neural_network = []
+        for ii in range(len(Nneurons)-1):
+            new_layer = np.zeros((Nneurons[ii+1]-1,Nneurons[ii]))
+            if ii == 0:
+                new_layer[:np.shape(previous_neural_network[ii])[0],include_booleans_prev[include_booleans]] = previous_neural_network[ii]
+            else:
+                new_layer[:np.shape(previous_neural_network[ii])[0],:np.shape(previous_neural_network[ii])[1]] = previous_neural_network[ii]
+            self.neural_network.append(new_layer)
 
 class RACE:
-    def __init__(self,circuit,car,laps,agents,survival_rate,MaxTime):
+    def __init__(self,circuit,car,laps,agents,MaxTime):
         self.circuit = circuit
         self.car = car
         self.laps = laps
@@ -509,17 +547,16 @@ class RACE:
         self.state = RACE.STATE(Nagents=self.Nagents, circuit=self.circuit, Nlaps=self.laps)
         self.neural_networks = [np.rollaxis(np.dstack([agent.neural_network[layer] for agent in agents]), -1)
                                 for layer in range(len(agents[0].neural_network))] # shape (Nlayers,Nagents,Ncols,Nrows)
-        self.Nsurvivors = int(survival_rate*self.Nagents)
         self.remaining_drivers = np.arange(self.Nagents, dtype=int)
-        self.survivors = []
-        self.Nfinishers = 1
+        self.Nfinishers = 0
+        self.penalty = np.zeros(self.Nagents)
         
     def simulate(self,saveas=''):
         def draw_cars_and_save_frame():
             # Draw the cars in the correct position and orientation
             car_images = []
             zorder = max(artist.get_zorder() for artist in ax.get_children())
-            for aa in range(min(self.Nagents,25)):
+            for aa in range(min(self.Nagents,15)):
                 zorder += 1
                 p = self.state.position[[aa],:].T # This is a 2*1 column array
                 TN = self.state.car_TN[aa]        # This is a 2*2 array
@@ -557,30 +594,14 @@ class RACE:
 
         MaxSteps = int(self.MaxTime / dt)
         tt = 0
-        abandoned_distance_to_finish = dict()
-        while len(self.survivors) < self.Nsurvivors:
+        stop = False
+        while not(stop):
             # Determine the inputs to the neural networks, i.e. what the agent sees. (one vector for every agent)
-            # agent_states = np.column_stack([np.tile(self.car.fixed_parameters,(self.Nagents,1)), # fixed car stats
-            #                                 self.state.health_tank, # variable car stats
-            #                                 self.state.tyres_deterioration, # variable car stats
-            #                                 self.state.distance_to_finish,
-            #                                 self.state.position_local, # position (environment)
-            #                                 self.state.velocity_local, # velocity
-            #                                 self.state.orientation_local, # orientation (environment)
-            #                                 self.state.omega, # rotational speed
-            #                                 self.state.length_future, # environment
-            #                                 self.state.curvature_future]) # environment
-            agent_states = np.column_stack([self.state.health_tank, # variable car stats
-                                            self.state.tyres_deterioration, # variable car stats
-                                            self.state.position_local, # position (environment)
-                                            self.state.velocity_local, # velocity
-                                            self.state.orientation_local, # orientation (environment)
-                                            self.state.omega, # rotational speed
-                                            self.state.length_future, # environment
-                                            self.state.curvature_future]) # environment                # shape (Nagents,Ninputs)
+            state = np.column_stack([np.tile([getattr(self.car, attr)[include_car_vars[attr]].squeeze() for attr in include_car_vars.keys() if not(include_car_vars[attr]==False)], (self.Nagents,1))] +
+                                    [getattr(self.state, attr)[:,include_state_vars[attr]] for attr in include_state_vars.keys() if not(include_state_vars[attr]==False)])
 
             # The agents determine which action to take
-            actions = self.get_actions(agent_states) # shape (Nagents,Nactions)
+            actions = self.get_actions(state) # shape (Nagents,Nactions)
 
             # Simulate to get the new state
             self.state.simulate(actions,dt,self.circuit,self.car,self.laps)
@@ -588,31 +609,25 @@ class RACE:
             if save:
                 draw_cars_and_save_frame()
             
+            tt += 1
             finished = self.state.distance_to_finish <= 0
             if np.any(finished):
-                self.survivors.extend(self.remaining_drivers[np.where(finished)[0]])
+                self.Nfinishers += np.sum(finished)
+                self.penalty[self.remaining_drivers[np.where(finished)[0]]] = tt*dt
                 self.remove_agents(finished)
             
-            abandoned = np.logical_or(np.abs(self.state.position_local[:,1]) > road_width/2,
-                                      np.abs(self.state.orientation_local) > np.pi/2)
+            if tt < MaxSteps and self.Nagents > max(1,self.Nfinishers):
+                # abandoned = np.logical_or(np.abs(self.state.position_local[:,1]) > road_width/2, 
+                #                           np.abs(self.state.orientation_local) > np.pi/2, 
+                #                           np.logical_and(self.state.health_tank <= 0, np.linalg.norm(self.state.velocity,axis=1)<1e-2))
+                abandoned = np.logical_or(np.abs(self.state.position_local[:,1]) > road_width, 
+                                          np.logical_and(self.state.health_tank <= 0, np.linalg.norm(self.state.velocity,axis=1)<1e-2))
+            else:
+                abandoned = np.ones(self.Nagents, dtype=bool)
+                stop = True
             if np.any(abandoned):
-                for idx in np.where(abandoned)[0]:
-                    abandoned_distance_to_finish[self.remaining_drivers[idx]] = self.state.distance_to_finish[idx]
+                self.penalty[self.remaining_drivers[np.where(abandoned)[0]]] = MaxSteps*dt + self.state.distance_to_finish[abandoned]
                 self.remove_agents(abandoned)
-
-            tt += 1
-            if tt >= MaxSteps or len(self.remaining_drivers) <= 1:
-                self.Nfinishers = len(self.survivors) / self.Nsurvivors
-                # The number of survivors is less than required. Therefore, the ones that are closest to the finish also survive.
-                drivers = np.concatenate((self.remaining_drivers, np.array(list(abandoned_distance_to_finish.keys()))))
-                score = np.concatenate((self.state.distance_to_finish, np.array(list(abandoned_distance_to_finish.values()))))
-
-                while len(self.survivors) < self.Nsurvivors:
-                    idx = np.argmin(score)
-                    self.survivors.append(int(drivers[idx]))
-                    drivers = np.delete(drivers, idx)
-                    score = np.delete(score, idx)
-                break
 
         if save:
             out.release()
@@ -626,7 +641,7 @@ class RACE:
         bias = np.repeat(1,self.Nagents)
         output = input
         for layer in self.neural_networks:
-            input = np.column_stack((bias, output)) # environment
+            input = np.column_stack((bias, output))
             output = sigmoid(np.matmul(layer, input[:,:,np.newaxis]).squeeze())
         output =  2*output.squeeze() - 1 # All in the interval [-1,1]
         return output
@@ -738,9 +753,9 @@ class RACE:
             positive_acceleration = action_acceleration > 0
             acceleration_linear = np.where(positive_acceleration, action_acceleration * car.max_acceleration, 
                                                                   action_acceleration * car.max_deceleration)
-            efficiency = np.maximum(1e-10, np.where(positive_acceleration, car.engine_efficiency * (1-np.exp(action_acceleration-1)) / (1-np.exp(-1)), np.inf))
+            efficiency = np.maximum(1e-3, np.where(positive_acceleration, car.engine_efficiency * (1-np.exp(action_acceleration-1)) / (1-np.exp(-1)), np.inf))
                 # efficiency = base_efficiency * (1 - exp(acceleration / max_acceleration))
-            self.health_tank -= acceleration_linear * np.linalg.norm(self.velocity,axis=1) / efficiency * dt
+            self.health_tank -= acceleration_linear * np.linalg.norm(self.velocity,axis=1) / efficiency * dt / tank_unit
                 # Energy consumption = int(F*v)*dt
             
             # We work in the car frame, meaning that (1,0) corresponds to the car tangent and (0,1) corresponds to the car normal.
@@ -823,16 +838,17 @@ wheel_rvectors = np.array([ [ car_size[0], car_size[1]], #front left wheel
                             ]) /2                        #shape (4,2)
 
 # Physical parameters
-dt = 1/8 #[s]
+dt = 1/4 #[s]
 g = 9.81 #[m/s²]
 drift_grip_multiplyer = .85
 offroad_grip_multiplyer = .55
 offroad_roll_resistance_multiplyer = 50
 moment_of_inertia_per_mass = np.sum(car_size**2) /12 + np.sum(car_size) /8
 drift_deterioration_multiplyer = 20
+tank_unit = 1e6 # mega-Joule
 
 # Display parameters
-video_speedup = 2
+video_speedup = 4
 frameSize = (2000,1130) #[pixels]
 fig_size = np.array([20, 11.3]) #[inches]
 
@@ -857,69 +873,123 @@ fig_size = np.array([20, 11.3]) #[inches]
 
 
 
-
-racenum = 0
-generation = 0
+survival_rate = .25
 eps = 1
-
+Nraces = 25
 Nsegments_min = 4
-Nsegments_max = 6
-Nturns = 1 # The number of turns that need to be taken by the agents
-start_coordinates_min = np.array([-.05,-.05])
-start_coordinates_max = np.array([0,.05])
-MaxTime = 50
+Nsegments_max = 10
+# Nturns = 1
+car_interval_width = 1
+MaxTime = 2.5*60*video_speedup
 
 Nagents = 5000
-survival_rate = .95
-agents = [AGENT(eps=eps) for dummy in range(Nagents)]
-# file = open('../output/20240121_1309_gen200', 'rb')
-# agents = pickle.load(file)
-# file.close()
+# include_car_vars = {'engine_efficiency': False, 'max_acceleration': False, 'max_deceleration': False, 'tank': False, 'grip': False, 'tyre_max_dist': False, 'roll_resistance_coef': False, 'air_resistance_coef': False}
+# include_state_vars = {'health_tank': False, 'tyres_deterioration': False, 'distance_to_finish': False, 'position_local': [True,True], 'velocity_local': [True,True], 'orientation_local': True, 'omega': True, 'length_future': [True,False,False], 'curvature_future': [True,True,False,False]}
+# agents = [AGENT(include_car_vars,include_state_vars, eps=eps) for dummy in range(Nagents)]
+with open('../output/20240203_1445_gen50', 'rb') as f:
+    print('Loading agents')
+    include_car_vars = pickle.load(f)
+    include_state_vars = pickle.load(f)
+    agents = pickle.load(f)
+    print(include_car_vars)
+    print(include_state_vars)
 
-# car = CAR(np.random.uniform(0,1,8))
-car = CAR(np.repeat(.7,8))
+# print('Upgrading agents')
+# include_car_vars_prev = include_car_vars
+# include_state_vars_prev = include_state_vars
+# include_car_vars = {'engine_efficiency': True, 'max_acceleration': True, 'max_deceleration': True, 'tank': False, 'grip': True, 'tyre_max_dist': False, 'roll_resistance_coef': True, 'air_resistance_coef': True}
+# include_state_vars = {'health_tank': True, 'tyres_deterioration': True, 'distance_to_finish': False, 'position_local': [True,True], 'velocity_local': [True,True], 'orientation_local': True, 'omega': True, 'length_future': [True,False,False], 'curvature_future': [True,True,False,False]}
+# for agent in agents:
+#     agent.upgrade(include_car_vars_prev, include_state_vars_prev, include_car_vars, include_state_vars)
 
+generation = 0
+Nfinishers = 0
+# next_change_generation = 0
 while True:
-    Nsegments = np.random.randint(Nsegments_min, Nsegments_max)
-    circuit = CIRCUIT(circuit_diagonal=np.random.uniform(200,350), N=Nsegments, Nturns=Nturns, start_coordinates=np.random.uniform(start_coordinates_min,start_coordinates_max))
-    race = RACE(circuit=circuit,car=car,laps=1,agents=agents,survival_rate=survival_rate,MaxTime=MaxTime)
+    generation += 1
 
-    save = racenum == 0
-    if save:
-        current_datetime = datetime.now()
-        date_string = current_datetime.strftime("%Y%m%d_%H%M")
-        filename = date_string + '_gen' + str(generation)
-        file = open(output_folder+'/'+filename, 'wb')
-        pickle.dump(agents, file)
-        file.close()
-        start = time.time()
-        race.simulate(saveas=output_folder+'/'+filename+'.mp4')
-        time_race = time.time() - start
-    else:
-        start = time.time()
-        race.simulate()
-        time_race = time.time() - start
+    age = generation - np.asarray([agent.generation for agent in agents])
+    Nage1 = np.mean(age==1)
+    if Nage1 > (1-survival_rate) and eps < 1:
+        eps *= 1.1
+    elif Nage1 < (1-survival_rate)/4 and eps > .01:
+        eps *= .9
 
-    print(f"race={racenum}, time_simulation={time_race}, Nagents={len(agents)}, Nfinishers={race.Nfinishers}")
-    agents = [agents[sv] for sv in race.survivors]
-    racenum += 1
+    # if Nfinishers > survival_rate * Nagents: #and generation >= next_change_generation:
+        # if not(Nturns is None):
+        #     # increase complexity of circuit
+        #     if Nturns < Nsegments_max:
+        #         Nturns += 1
+        #         MaxTime *= (Nturns/(Nturns-1))
+        #         print(f'Nturns increased to {Nturns}')
+        #     else:
+        #         Nturns = None
+        #         print('Nturns set to maximum')
+        # else:
+            ## increase complexity of inputs
+            # include_car_vars_prev = copy.deepcopy(include_car_vars)
+            # include_state_vars_prev = copy.deepcopy(include_state_vars)
+            # if not(include_state_vars['curvature_future'][1]):
+            #     include_state_vars['curvature_future'][1] = True
+            #     print('curvature_future[1] added')
+            # elif not(include_state_vars['health_tank']):
+            #     include_state_vars['health_tank'] = True
+            #     print('health_tank added')
+            # elif not(include_state_vars['tyres_deterioration']):
+            #     include_state_vars['tyres_deterioration'] = True
+            #     print('tyres_deterioration added')
+            # elif not(include_state_vars['distance_to_finish']):
+            #     include_state_vars['distance_to_finish']= True
+            #     print('distance_to_finish added')
+            # for agent in agents:
+            #     agent.upgrade(include_car_vars_prev, include_state_vars_prev, include_car_vars, include_state_vars)
+        # next_change_generation = generation + 10
 
-    if len(agents) < Nagents:
-        generation += 1
-        racenum = 0
-        # new_agents = copy.deepcopy(agents * math.ceil(Nagents/len(agents) - 1))
+        # car_interval_width = min(car_interval_width*1.1, 1)
+        # print(f'car_interval_width increased to {car_interval_width}')
+
+    print(f"gen={generation}, Nfinishers={Nfinishers}, Nage1={Nage1}, eps={eps}")
+
+    # Create offspring
+    while len(agents) < Nagents:
         new_agents = copy.deepcopy(agents)
         for agent in new_agents:
             agent.mutate(eps, generation=generation)
         agents = agents + new_agents
 
-        age = generation - np.asarray([agent.generation for agent in agents])
-        numOfAge1 = np.mean(age==1)
-        print(f"gen={generation}, Nage1={numOfAge1}, survival_rate={survival_rate}, eps={eps}")
+    # Simulate races
+    penalties = np.zeros(len(agents))
+    Nfinishers = 0
+    for racenum in range(Nraces):
+        while True:
+            try:
+                Nsegments = np.random.randint(Nsegments_min, Nsegments_max)
+                # car = CAR(np.repeat(.5,8))
+                car = CAR(np.random.uniform(.5-car_interval_width/2, .5+car_interval_width/2, 8))
+                circuit = CIRCUIT(circuit_diagonal=np.random.uniform(200,350), N=Nsegments, start_coordinates=np.random.uniform([0,-.5],[-1,.5]))
+                # circuit = CIRCUIT(circuit_diagonal=np.random.uniform(200,350), N=Nsegments, Nturns=min(Nturns,Nsegments), start_coordinates=np.random.uniform([0,-.5],[-1,.5]))
+                race = RACE(circuit=circuit,car=car,laps=1,agents=agents,MaxTime=MaxTime)
 
-        # if numOfAge1 < survival_rate**2/10 and eps>1e-10:
-        #     eps *= .9
-        # elif numOfAge1 > survival_rate**2/2 and eps<1:
-        #     eps *= 1.1
-        # elif numOfAge1 < .01 and survival_rate>2/Nagents:
-        #     survival_rate *= .99
+                save = (generation%25 == 0 and racenum == 0)
+                if save:
+                    current_datetime = datetime.now()
+                    date_string = current_datetime.strftime("%Y%m%d_%H%M")
+                    filename = date_string + '_gen' + str(generation)
+                    with open(output_folder+'/'+filename, 'wb') as f:
+                        pickle.dump(include_car_vars, f)
+                        pickle.dump(include_state_vars, f)
+                        pickle.dump(agents, f)
+                    race.simulate(saveas=output_folder+'/'+filename+'.mp4')
+                else:
+                    race.simulate()
+                break
+            except:
+                print('An error occurred. Trying again.')
+                continue
+
+        penalties += race.penalty
+        Nfinishers += race.Nfinishers
+    Nfinishers /= Nraces
+
+    # Keep the best agents
+    agents = [agents[idx] for idx in np.argsort(penalties)[:int(survival_rate*Nagents)]]
