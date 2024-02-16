@@ -5,9 +5,6 @@ import matplotlib.transforms as transforms
 from matplotlib.backends.backend_agg import FigureCanvasAgg as FigureCanvas
 import cv2
 import time
-import pickle
-from datetime import datetime
-import copy
 
 # Select folders
 output_folder = '../output'
@@ -59,19 +56,20 @@ def to_frame(vector,frame_TN):
     elif vector.ndim == 2 and frame_TN.ndim == 2:
         # vector has shape (N,2)
         # frameTN has shape (2,2)
-        return np.matmul(np.transpose(frame_TN)[np.newaxis,:,:], vector[:,:,np.newaxis]).squeeze() # shape (N,2)
+        return np.matmul(np.transpose(frame_TN)[np.newaxis,:,:], vector[:,:,np.newaxis]).squeeze(axis=2) # shape (N,2)
     elif vector.ndim == 2 and frame_TN.ndim == 3:
         # vector has shape (N,2)
         # frameTN has shape (N,2,2)
-        return np.matmul(np.transpose(frame_TN,[0,2,1]), vector[:,:,np.newaxis]).squeeze() # shape (N,2)
+        return np.matmul(np.transpose(frame_TN,[0,2,1]), vector[:,:,np.newaxis]).squeeze(axis=2) # shape (N,2)
     else:
         # vector has shape (Nagents,Nwheels,2)
         # frameTN has shape (Nagents,Nweels,2,2)
-        return np.matmul(np.transpose(frame_TN,[0,1,3,2]), vector[:,:,:,np.newaxis]).squeeze() # shape (Nagents,Nwheels,2)
+        return np.matmul(np.transpose(frame_TN,[0,1,3,2]), vector[:,:,:,np.newaxis]).squeeze(axis=3) # shape (Nagents,Nwheels,2)
     
 
 class CIRCUIT:
-    def __init__(self,circuit_diagonal,N,Nturns=None,start_coordinates=np.array([-.8,0])):
+    def __init__(self,circuit_diagonal,N,Nturns=None,Nstartspots=1,start_coordinate=-.8,start_coordinate2=0):
+        # start_coordinate2 is ignored if Nstartspots>1.
         assert N > 3 # For N=3, an infinite loop may/will occur in the untangle_knot function.
 
         # Create figure
@@ -144,7 +142,11 @@ class CIRCUIT:
         else:
             self.start_segment = int(self.Nsegments - Nturns)
         
-        self.start = self.destination[self.start_segment,:] + self.TN[self.start_segment] @ (start_coordinates * np.array([self.length[self.start_segment], road_width])) # shape (Nsegments,2)
+        if Nstartspots == 1:
+            self.start = self.destination[self.start_segment,:] + self.TN[self.start_segment] @ np.array([start_coordinate*self.length[self.start_segment], start_coordinate2*road_width])
+            self.start = self.start[np.newaxis,:] # shape (Nstartspots,2)
+        else:
+            self.start = self.destination[self.start_segment,:][np.newaxis,:] + start_coordinate * self.length[self.start_segment] * self.TN[self.start_segment,:,0][np.newaxis,:] + np.linspace(-(Nstartspots-1)/(2*Nstartspots)*road_width,(Nstartspots-1)/(2*Nstartspots)*road_width,Nstartspots)[:,np.newaxis] * self.TN[self.start_segment,:,1][np.newaxis,:] # shape (Nstartspots,2)
         self.finish = -.2 * self.length[0] # This is the tangential component of the local position in segment[0]
 
         temp = self.length + self.length_turning
@@ -467,13 +469,13 @@ class CIRCUIT:
                 return np.min(dist_to_intersection)
         
         def translate_to_center(self):
-            self.destination += (np.min(self.destination, axis=0) + np.max(self.destination, axis=0) - self.size)[np.newaxis,:]
+            self.destination -= (np.min(self.destination, axis=0) + np.max(self.destination, axis=0) - self.size)[np.newaxis,:]
 
 class CAR:
-    def __init__(self,quality):
+    def __init__(self,quality,color='red'):
         def get_value(coordinate,min,max):
             return min + coordinate*(max-min)
-        
+        self.img = mpimg.imread(f'../Car_{color}.png')
         self.engine_efficiency     = get_value(quality[0], .2, .55) # scalar
         self.max_acceleration      = get_value(quality[1], 2.25, 14.2) # m/s²
         self.max_deceleration      = get_value(quality[2], 5., 45.) # m/s²
@@ -536,7 +538,7 @@ class AGENT:
             self.neural_network.append(new_layer)
 
 class RACE:
-    def __init__(self,circuit,car,laps,agents,include_car_vars,include_state_vars,MaxTime):
+    def __init__(self,circuit,car,laps,agents,include_car_vars,include_state_vars,MaxTime,interaction=True):
         self.circuit = circuit
         self.car = car
         self.laps = laps
@@ -544,6 +546,7 @@ class RACE:
         self.Nagents = len(agents)
         self.include_car_vars = include_car_vars
         self.include_state_vars = include_state_vars
+        self.interaction = interaction
         self.state = RACE.STATE(Nagents=self.Nagents, circuit=self.circuit, Nlaps=self.laps, car=self.car)
         self.neural_networks = [np.rollaxis(np.dstack([agent.neural_network[layer] for agent in agents]), -1)
                                 for layer in range(len(agents[0].neural_network))] # shape (Nlayers,Nagents,Ncols,Nrows)
@@ -561,7 +564,7 @@ class RACE:
                 p = self.state.position[[aa],:].T # This is a 2*1 column array
                 TN = self.state.car_TN[aa]        # This is a 2*2 array
                 transformation = transforms.Affine2D(matrix=np.block([[TN,p], [0,0,1]]))
-                car_images.append(ax.imshow(img,
+                car_images.append(ax.imshow(self.car.img,
                                             extent = [-car_size[0]/2, car_size[0]/2, -car_size[1]/2, car_size[1]/2],
                                             transform = transformation + ax.transData,
                                             zorder = zorder))
@@ -589,7 +592,7 @@ class RACE:
             # Initialise video
             fourcc = cv2.VideoWriter_fourcc(*'mp4v')
             out = cv2.VideoWriter(saveas, fourcc, fps=video_speedup/dt, frameSize=frameSize)
-            img = mpimg.imread('../Car.png')
+            
             draw_cars_and_save_frame()
 
         MaxSteps = int(self.MaxTime / dt)
@@ -604,7 +607,7 @@ class RACE:
             actions = self.get_actions(state) # shape (Nagents,Nactions)
 
             # Simulate to get the new state
-            self.state.simulate(actions,dt,self.circuit,self.car,self.laps)
+            self.state.simulate(actions,dt,self.circuit,self.car,self.laps,self.interaction)
 
             if save:
                 draw_cars_and_save_frame()
@@ -616,11 +619,8 @@ class RACE:
                 self.penalty[self.remaining_drivers[np.where(finished)[0]]] = tt*dt
                 self.remove_agents(finished)
             
-            if tt < MaxSteps and self.Nagents > max(1,self.Nfinishers):
-                # abandoned = np.logical_or(np.abs(self.state.position_local[:,1]) > road_width/2, 
-                #                           np.abs(self.state.orientation_local) > np.pi/2, 
-                #                           np.logical_and(self.state.health_tank <= 0, np.linalg.norm(self.state.velocity,axis=1)<1e-2))
-                abandoned = np.logical_or(np.abs(self.state.position_local[:,1]) > road_width, 
+            if tt < MaxSteps and self.Nagents > self.Nfinishers:
+                abandoned = np.logical_or(np.abs(self.state.position_local[:,1]) > 2*road_width, 
                                           np.logical_and(self.state.health_tank <= 0, np.linalg.norm(self.state.velocity,axis=1)<1e-2))
             else:
                 abandoned = np.ones(self.Nagents, dtype=bool)
@@ -642,8 +642,8 @@ class RACE:
         output = input
         for layer in self.neural_networks:
             input = np.column_stack((bias, output))
-            output = sigmoid(np.matmul(layer, input[:,:,np.newaxis]).squeeze())
-        output =  2*output.squeeze() - 1 # All in the interval [-1,1]
+            output = sigmoid(np.matmul(layer, input[:,:,np.newaxis]).squeeze(axis=2))
+        output =  2*output - 1 # All in the interval [-1,1]
         return output
     
     def remove_agents(self,mask):
@@ -654,7 +654,10 @@ class RACE:
     
     class STATE:
         def __init__(self,Nagents,circuit,Nlaps,car):
-            self.position = np.repeat([circuit.start], Nagents, axis=0)       # shape (Nagents,2)
+            if np.shape(circuit.start)[0] == 1:
+                self.position = np.repeat(circuit.start, Nagents, axis=0)   # shape (Nagents,2)
+            else:
+                self.position = circuit.start                                 # shape (Nagents,2)
             self.velocity = np.zeros((Nagents, 2))                            # shape (Nagents,2)
             self.orientation = np.repeat(circuit.orientation[circuit.start_segment], Nagents) # shape Nagents
             self.car_TN = get_TN_from_angle(self.orientation)                 # shape (Nagents,2,2)
@@ -701,11 +704,11 @@ class RACE:
             self.TN_local[self.reached_turning,0,0] = self.TN_local[self.reached_turning,1,1] #Tx = Ny
             self.TN_local[self.reached_turning,1,0] = -self.TN_local[self.reached_turning,0,1] #Ty = -Nx
 
-            self.position_local[np.logical_not(self.reached_turning)] = np.matmul((self.position[np.logical_not(self.reached_turning)]-circuit.destination[self.segment[np.logical_not(self.reached_turning)],:])[:, np.newaxis, :], self.TN_local[np.logical_not(self.reached_turning)]).squeeze()
+            self.position_local[np.logical_not(self.reached_turning)] = np.matmul((self.position[np.logical_not(self.reached_turning)]-circuit.destination[self.segment[np.logical_not(self.reached_turning)],:])[:, np.newaxis, :], self.TN_local[np.logical_not(self.reached_turning)]).squeeze(axis=1)
             self.position_local[self.reached_turning,1] = -np.sign(circuit.curvature[self.segment[self.reached_turning]]) * (dist_from_center - circuit.radius[self.segment[self.reached_turning]])
             self.position_local[self.reached_turning,0] = circuit.radius[self.segment[self.reached_turning]] * angle_minus(vector2angle(disp_from_center), circuit.angle_final[self.segment[self.reached_turning]]) * np.sign(circuit.angle_change[self.segment[self.reached_turning]])
 
-            self.velocity_local = np.matmul(self.velocity[:, np.newaxis, :], self.TN_local).squeeze()
+            self.velocity_local = np.matmul(self.velocity[:, np.newaxis, :], self.TN_local).squeeze(axis=1)
 
             self.orientation_local = angle_minus(self.orientation, vector2angle(self.TN_local[:,:,0]))
 
@@ -733,13 +736,13 @@ class RACE:
                 any_change = False
             return any_change
 
-        def simulate(self,actions,dt,circuit,car,Nlaps):
+        def simulate(self,actions,dt,circuit,car,Nlaps,interaction):
             ### Derive the forces exerted by the road ###
             # Determine whether wheels are on road or grass
-            car_Normal_local = np.matmul(np.transpose(self.TN_local,(0,2,1)), self.car_TN[:,:,1,np.newaxis]).squeeze() # shape (Nagents,2)
+            car_Normal_local = np.matmul(np.transpose(self.TN_local,(0,2,1)), self.car_TN[:,:,1,np.newaxis]).squeeze(axis=2) # shape (Nagents,2)
                 # car_TN_local = TN_local.transpose() @ car_TN
                 # car_Normal_local = TN_local.transpose() @ car_Normal
-            wheels_Npos_local = self.position_local[:,np.newaxis,1] + np.tensordot(car_Normal_local[:,np.newaxis,:], wheel_rvectors[np.newaxis,:,:], axes=(2,2)).squeeze() #shape (Nagents,Nwheels)
+            wheels_Npos_local = self.position_local[:,np.newaxis,1] + np.tensordot(car_Normal_local[:,np.newaxis,:], wheel_rvectors[np.newaxis,:,:], axes=(2,2)).squeeze(axis=(1,2)) #shape (Nagents,Nwheels)
                 # wheels_Npos_local = position_local[1] + np.dot(car_Normal_local, wheel_rvector)
             
             mask_offroad = np.abs(wheels_Npos_local) > road_width/2 #shape (Nagents,Nwheels)
@@ -789,22 +792,29 @@ class RACE:
             acceleration_surface[:,:,0] = np.maximum(acceleration_surface[:,:,0], -wheel_velocity[:,:,0]/dt)
             
             # We work in the car frame, meaning that (1,0) corresponds to the car tangent and (0,1) corresponds to the car normal.
-            acceleration_surface[:,[0,1],:] = np.matmul(front_wheel_TN, acceleration_surface[:,[0,1],:,np.newaxis]).squeeze() # shape (Nagents,Nwheels,2)
+            acceleration_surface[:,[0,1],:] = np.matmul(front_wheel_TN, acceleration_surface[:,[0,1],:,np.newaxis]).squeeze(axis=3) # shape (Nagents,Nwheels,2)
                 # Conversion from wheel frame to car frame
 
             # Equivalent forces
-            acceleration_surface_eq = np.mean(acceleration_surface, axis=1).squeeze() # shape (Nagents,2)
+            acceleration_surface_eq = np.mean(acceleration_surface, axis=1) # shape (Nagents,2)
                 # translational force
             torque_per_mass = wheel_rvectors[np.newaxis,:,0] * acceleration_surface[:,:,1] - wheel_rvectors[np.newaxis,:,1] * acceleration_surface[:,:,0]  # shape (Nagents,Nwheels)
                 # torque = r x F, so torque_z = r_x * F_y - r_y * F_x
-            torque_per_mass = np.mean(torque_per_mass, axis=1).squeeze() # shape (Nagents,2)
+            torque_per_mass = np.mean(torque_per_mass, axis=1) # shape (Nagents,2)
                 # rotational force
                 # We use mean and not sum. That is because we are working with acceleration and not force. If we would be working with force, we should've used mass/4 for each wheel.
 
             ### Add air resistance ###
-            acceleration_surface = np.matmul(self.car_TN, acceleration_surface_eq[:,:,np.newaxis]).squeeze() # shape (Nagents,2)
+            acceleration_surface = np.matmul(self.car_TN, acceleration_surface_eq[:,:,np.newaxis]).squeeze(axis=2) # shape (Nagents,2)
                 # Conversion to global frame
             acceleration = acceleration_surface - car.air_resistance_coef * np.linalg.norm(self.velocity,axis=1)[:,np.newaxis] * self.velocity # shape (Nagents,2)
+
+            if interaction:
+                copy_position = np.array(self.position)
+                copy_velocity = np.array(self.velocity)
+                copy_orientation = np.array(self.orientation)
+                copy_omega = np.array(self.omega)
+                copy_car_TN = np.array(self.car_TN)
 
             ### Apply integration scheme ###
             self.position += dt/2 * self.velocity
@@ -815,6 +825,52 @@ class RACE:
             self.omega += dt / moment_of_inertia_per_mass * torque_per_mass
             self.car_TN = get_TN_from_angle(self.orientation)
             self.orientation += dt/2 * self.omega
+
+            ### Check for colisions ###
+            if interaction:
+                in_range = np.linalg.norm(self.position[:,np.newaxis,:] - self.position[np.newaxis,:,:], axis=2) < np.linalg.norm(car_size)
+                IDX1, IDX2 = np.where(np.triu(in_range, k=1))
+                for idx1, idx2 in zip(IDX1, IDX2):
+                    #get the positions of the wheels of both cars
+                    wheels_pos = self.position[[idx1,idx2],np.newaxis,:] + np.matmul(self.car_TN[[idx1,idx2],np.newaxis,:,:], wheel_rvectors[np.newaxis,:,:,np.newaxis]).squeeze() # shape (2,Nwheels,2)
+                    #check whether colision occurs
+                    wheels_car1_in_frame_car2 = to_frame(wheels_pos[0,:,:].squeeze()-self.position[idx2],self.car_TN[idx2]) # The coordinates of the wheels of car 1 in the frame of car 2
+                    wheels_car2_in_frame_car1 = to_frame(wheels_pos[1,:,:].squeeze()-self.position[idx1],self.car_TN[idx1]) # The coordinates of the wheels of car 2 in the frame of car 1
+                    intersect1 = np.all(np.abs(wheels_car1_in_frame_car2) - car_size/2 <= 0, axis=1)
+                    intersect2 = np.all(np.abs(wheels_car2_in_frame_car1) - car_size/2 <= 0, axis=1)
+                    if ~np.any(intersect1) and ~np.any(intersect2):
+                        #no colision occurs
+                        continue
+                    #find the point of colision
+                    r_hit = np.mean(np.concatenate((wheels_pos[0,intersect1,:], wheels_pos[1,intersect2,:]), axis=0), axis=0).squeeze()
+                    velocity_r_hit1 = self.velocity[idx1,:] + self.omega[idx1] * np.asarray([[0,-1],[1,0]]) @ (r_hit-self.position[idx1])
+                    velocity_r_hit2 = self.velocity[idx2,:] + self.omega[idx2] * np.asarray([[0,-1],[1,0]]) @ (r_hit-self.position[idx2])
+                    rvector1 = to_frame(r_hit-self.position[idx1], self.car_TN[idx1])
+                    rvector2 = to_frame(r_hit-self.position[idx2], self.car_TN[idx2])
+
+                    # Add force to both cars
+                    force = -(velocity_r_hit1-velocity_r_hit2) / dt # exerted on car1
+                    acceleration[idx1] += force
+                    torque_per_mass[idx1] += (rvector1[0] * force[1] - rvector1[1] * force[0])
+                    acceleration[idx2] -= force
+                    torque_per_mass[idx2] -= (rvector2[0] * force[1] - rvector2[1] * force[0])
+
+                    #undo integration scheme
+                    self.position = copy_position
+                    self.velocity = copy_velocity
+                    self.orientation = copy_orientation
+                    self.omega = copy_omega
+                    self.car_TN = copy_car_TN
+
+                    #re-apply integration scheme
+                    self.position += dt/2 * self.velocity
+                    self.velocity += dt * acceleration
+                    self.position += dt/2 * self.velocity
+
+                    self.orientation += dt/2 * self.omega
+                    self.omega += dt / moment_of_inertia_per_mass * torque_per_mass
+                    self.car_TN = get_TN_from_angle(self.orientation)
+                    self.orientation += dt/2 * self.omega
 
             ### Update local positions and counters ###
             any_change = True
@@ -829,8 +885,8 @@ class RACE:
                 setattr(self, attr, getattr(self, attr)[~mask])
 
 # Size parameters
-road_width = 10 #[meters]
-car_size = np.array([5,2.5]) #[meters]
+road_width = 12 #[meters]
+car_size = np.array([5,2]) #[meters]
 wheel_rvectors = np.array([ [ car_size[0], car_size[1]], #front left wheel
                             [ car_size[0],-car_size[1]], #front right wheel
                             [-car_size[0], car_size[1]], #back left wheel

@@ -1,5 +1,4 @@
 import numpy as np
-from matplotlib.backends.backend_agg import FigureCanvasAgg as FigureCanvas
 import pickle
 from datetime import datetime
 import copy
@@ -18,9 +17,13 @@ car_interval_width = 1
 MaxTime = 10*60
 
 Nagents = 5000
+
+## Start from scratch
 # include_car_vars = {'engine_efficiency': False, 'max_acceleration': False, 'max_deceleration': False, 'tank': False, 'grip': False, 'tyre_max_dist': False, 'roll_resistance_coef': False, 'air_resistance_coef': False}
 # include_state_vars = {'health_tank': False, 'tyres_deterioration': False, 'distance_to_finish': False, 'position_local': [True,True], 'velocity_local': [True,True], 'orientation_local': True, 'omega': True, 'length_future': [True,False,False], 'curvature_future': [True,True,False,False]}
 # agents = [AGENT(include_car_vars,include_state_vars, eps=eps) for dummy in range(Nagents)]
+
+# # Start from previously trained agents
 with open('../output/20240203_2222_gen100', 'rb') as f:
     print('Loading agents')
     include_car_vars = pickle.load(f)
@@ -29,7 +32,7 @@ with open('../output/20240203_2222_gen100', 'rb') as f:
     print(include_car_vars)
     print(include_state_vars)
 
-# print('Upgrading agents')
+# # print('Upgrading agents')
 # include_car_vars_prev = include_car_vars
 # include_state_vars_prev = include_state_vars
 # include_car_vars = {'engine_efficiency': True, 'max_acceleration': True, 'max_deceleration': True, 'tank': False, 'grip': True, 'tyre_max_dist': False, 'roll_resistance_coef': True, 'air_resistance_coef': True}
@@ -37,8 +40,14 @@ with open('../output/20240203_2222_gen100', 'rb') as f:
 # for agent in agents:
 #     agent.upgrade(include_car_vars_prev, include_state_vars_prev, include_car_vars, include_state_vars)
 
+# # Start from scrath with max possibility from the start
+# include_car_vars = {'engine_efficiency': True, 'max_acceleration': True, 'max_deceleration': True, 'tank': False, 'grip': True, 'tyre_max_dist': False, 'roll_resistance_coef': True, 'air_resistance_coef': True}
+# include_state_vars = {'health_tank': True, 'tyres_deterioration': True, 'distance_to_finish': False, 'position_local': [True,True], 'velocity_local': [True,True], 'orientation_local': True, 'omega': True, 'length_future': [True,False,False], 'curvature_future': [True,True,False,False]}
+# agents = [AGENT(include_car_vars,include_state_vars, eps=eps) for dummy in range(Nagents)]
+
 generation = 0
 Nfinishers = 0
+
 # next_change_generation = 0
 while True:
     generation += 1
@@ -97,13 +106,13 @@ while True:
     Nfinishers = 0
     for racenum in range(Nraces):
         while True:
-            try:
+            if True:
                 Nsegments = np.random.randint(Nsegments_min, Nsegments_max)
-                # car = CAR(np.repeat(.5,8))
-                car = CAR(np.random.uniform(.5-car_interval_width/2, .5+car_interval_width/2, 8))
-                circuit = CIRCUIT(circuit_diagonal=np.random.uniform(200,350), N=Nsegments, start_coordinates=np.random.uniform([0,-.5],[-1,.5]))
+                # car = CAR(np.repeat(.5,8), color='red')
+                car = CAR(np.random.uniform(.5-car_interval_width/2, .5+car_interval_width/2, 8), color='red')
+                circuit = CIRCUIT(circuit_diagonal=np.random.uniform(200,350), N=Nsegments, start_coordinate=np.random.uniform(0,-1), start_coordinate2=np.random.uniform(-.5,.5))
                 # circuit = CIRCUIT(circuit_diagonal=np.random.uniform(200,350), N=Nsegments, Nturns=min(Nturns,Nsegments), start_coordinates=np.random.uniform([0,-.5],[-1,.5]))
-                race = RACE(circuit=circuit,car=car,laps=1,agents=agents,include_car_vars=include_car_vars,include_state_vars=include_state_vars,MaxTime=MaxTime)
+                race = RACE(circuit=circuit,car=car,laps=1,agents=agents,include_car_vars=include_car_vars,include_state_vars=include_state_vars,MaxTime=MaxTime,interaction=False)
 
                 save = (generation%25 == 0 and racenum == 0)
                 if save:
@@ -117,10 +126,10 @@ while True:
                     race.simulate(saveas=output_folder+'/'+filename+'.mp4')
                 else:
                     race.simulate()
-                    break
-            except:
-                print('An error occurred. Trying again.')
-                continue
+                break
+            # except:
+            #     print('An error occurred. Trying again.')
+            #     continue
 
         penalties += race.penalty
         Nfinishers += race.Nfinishers
