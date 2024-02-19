@@ -61,14 +61,15 @@ def to_frame(vector,frame_TN):
         # vector has shape (N,2)
         # frameTN has shape (N,2,2)
         return np.matmul(np.transpose(frame_TN,[0,2,1]), vector[:,:,np.newaxis]).squeeze(axis=2) # shape (N,2)
-    else:
+    elif vector.ndim == 3 and frame_TN.ndim == 4:
         # vector has shape (Nagents,Nwheels,2)
         # frameTN has shape (Nagents,Nweels,2,2)
         return np.matmul(np.transpose(frame_TN,[0,1,3,2]), vector[:,:,:,np.newaxis]).squeeze(axis=3) # shape (Nagents,Nwheels,2)
-    
+    else:
+        raise NotImplementedError("The function to_frame was not implemented for {vector.ndim}-dimensional vector and {frame_TN.ndim}-dimensional frame_TN.")
 
 class CIRCUIT:
-    def __init__(self,circuit_diagonal,N,Nturns=None,Nstartspots=1,start_coordinate=-.8,start_coordinate2=0):
+    def __init__(self,circuit_diagonal,N,Nstartspots=1,start_coordinate=-.8,start_coordinate2=0):
         # start_coordinate2 is ignored if Nstartspots>1.
         assert N > 3 # For N=3, an infinite loop may/will occur in the untangle_knot function.
 
@@ -137,16 +138,11 @@ class CIRCUIT:
         self.orientation = vector2angle(self.TN[:,:,0]) # shape Nsegments
 
         # Select start and finish
-        if Nturns is None:
-            self.start_segment = 0
-        else:
-            self.start_segment = int(self.Nsegments - Nturns)
-        
         if Nstartspots == 1:
-            self.start = self.destination[self.start_segment,:] + self.TN[self.start_segment] @ np.array([start_coordinate*self.length[self.start_segment], start_coordinate2*road_width])
+            self.start = self.destination[0,:] + self.TN[0] @ np.array([start_coordinate*self.length[0], start_coordinate2*road_width])
             self.start = self.start[np.newaxis,:] # shape (Nstartspots,2)
         else:
-            self.start = self.destination[self.start_segment,:][np.newaxis,:] + start_coordinate * self.length[self.start_segment] * self.TN[self.start_segment,:,0][np.newaxis,:] + np.linspace(-(Nstartspots-1)/(2*Nstartspots)*road_width,(Nstartspots-1)/(2*Nstartspots)*road_width,Nstartspots)[:,np.newaxis] * self.TN[self.start_segment,:,1][np.newaxis,:] # shape (Nstartspots,2)
+            self.start = self.destination[0,:][np.newaxis,:] + start_coordinate * self.length[0] * self.TN[0,:,0][np.newaxis,:] + np.linspace(-(Nstartspots-1)/(2*Nstartspots)*road_width,(Nstartspots-1)/(2*Nstartspots)*road_width,Nstartspots)[:,np.newaxis] * self.TN[0,:,1][np.newaxis,:] # shape (Nstartspots,2)
         self.finish = -.2 * self.length[0] # This is the tangential component of the local position in segment[0]
 
         temp = self.length + self.length_turning
@@ -655,11 +651,11 @@ class RACE:
     class STATE:
         def __init__(self,Nagents,circuit,Nlaps,car):
             if np.shape(circuit.start)[0] == 1:
-                self.position = np.repeat(circuit.start, Nagents, axis=0)   # shape (Nagents,2)
+                self.position = np.repeat(circuit.start, Nagents, axis=0)     # shape (Nagents,2)
             else:
                 self.position = circuit.start                                 # shape (Nagents,2)
             self.velocity = np.zeros((Nagents, 2))                            # shape (Nagents,2)
-            self.orientation = np.repeat(circuit.orientation[circuit.start_segment], Nagents) # shape Nagents
+            self.orientation = np.repeat(circuit.orientation[0], Nagents)     # shape Nagents
             self.car_TN = get_TN_from_angle(self.orientation)                 # shape (Nagents,2,2)
             self.omega = np.zeros(Nagents)                                    # shape Nagents
             self.health_tank = np.repeat(car.tank, Nagents)                   # shape Nagents
@@ -667,7 +663,7 @@ class RACE:
 
             # Counters
             self.laps = np.zeros(Nagents, dtype=int)                          # shape Nagents
-            self.segment = np.repeat(circuit.start_segment, Nagents)          # shape Nagents
+            self.segment = np.repeat(0, Nagents)                              # shape Nagents
             self.reached_turning = np.repeat(False,Nagents)                   # shape Nagents
 
             # Local state
@@ -885,7 +881,7 @@ class RACE:
                 setattr(self, attr, getattr(self, attr)[~mask])
 
 # Size parameters
-road_width = 12 #[meters]
+road_width = 10 #[meters]
 car_size = np.array([5,2]) #[meters]
 wheel_rvectors = np.array([ [ car_size[0], car_size[1]], #front left wheel
                             [ car_size[0],-car_size[1]], #front right wheel
