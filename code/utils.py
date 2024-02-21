@@ -6,10 +6,6 @@ from matplotlib.backends.backend_agg import FigureCanvasAgg as FigureCanvas
 import cv2
 import time
 
-# Select folders
-output_folder = '../output'
-
-
 def vector2angle(vector):
     # Given a (radial) vector, return the angle with the x-axis.
     # The angle is expressed in the interval [-pi, pi].
@@ -69,8 +65,7 @@ def to_frame(vector,frame_TN):
         raise NotImplementedError("The function to_frame was not implemented for {vector.ndim}-dimensional vector and {frame_TN.ndim}-dimensional frame_TN.")
 
 class CIRCUIT:
-    def __init__(self,circuit_diagonal,N,Nstartspots=1,start_coordinate=-.8,start_coordinate2=0):
-        # start_coordinate2 is ignored if Nstartspots>1.
+    def __init__(self,circuit_diagonal,N):
         assert N > 3 # For N=3, an infinite loop may/will occur in the untangle_knot function.
 
         # Create figure
@@ -137,12 +132,7 @@ class CIRCUIT:
 
         self.orientation = vector2angle(self.TN[:,:,0]) # shape Nsegments
 
-        # Select start and finish
-        if Nstartspots == 1:
-            self.start = self.destination[0,:] + self.TN[0] @ np.array([start_coordinate*self.length[0], start_coordinate2*road_width])
-            self.start = self.start[np.newaxis,:] # shape (Nstartspots,2)
-        else:
-            self.start = self.destination[0,:][np.newaxis,:] + start_coordinate * self.length[0] * self.TN[0,:,0][np.newaxis,:] + np.linspace(-(Nstartspots-1)/(2*Nstartspots)*road_width,(Nstartspots-1)/(2*Nstartspots)*road_width,Nstartspots)[:,np.newaxis] * self.TN[0,:,1][np.newaxis,:] # shape (Nstartspots,2)
+        # Select finish
         self.finish = -.2 * self.length[0] # This is the tangential component of the local position in segment[0]
 
         temp = self.length + self.length_turning
@@ -471,14 +461,14 @@ class CAR:
     def __init__(self,quality,color='red'):
         def get_value(coordinate,min,max):
             return min + coordinate*(max-min)
-        self.img = mpimg.imread(f'../Car_{color}.png')
-        self.engine_efficiency     = get_value(quality[0], .2, .55) # scalar
-        self.max_acceleration      = get_value(quality[1], 2.25, 14.2) # m/s²
+        self.img = mpimg.imread(f'../graphics/Car_{color}.png')
+        self.engine_efficiency     = get_value(quality[0], .2, .6) # scalar
+        self.max_acceleration      = get_value(quality[1], 2.25, 14.5) # m/s²
         self.max_deceleration      = get_value(quality[2], 5., 45.) # m/s²
         self.tank                  = get_value(quality[3], 1e5 / tank_unit, 1e7 / tank_unit) # max 110 liter & 12.889 Wh/liter -> max 3.96e8 Joule
-        self.grip                  = get_value(quality[4], .9*g, 1.5*g) # m/s² , friction_coeficient * g
+        self.grip                  = get_value(quality[4], .8*g, 1.5*g) # m/s² , friction_coeficient * g
         self.tyre_max_dist         = get_value(quality[5], 1e5, 4e5) # km
-        self.roll_resistance_coef  = get_value(quality[6], .03*g, .007*g)
+        self.roll_resistance_coef  = get_value(quality[6], .03*g, .006*g)
         drag_coefficient           = get_value(quality[7], 1.1, .7) #usually ranges between 0.7 to 1.1
         self.air_resistance_coef = .5 * 1.225 * 1.75 * drag_coefficient
             # air_density = 1.225 kg/m³
@@ -486,10 +476,8 @@ class CAR:
             # frontal_area = 1.75 m² around 1.5 to 2.0 square meters
 
 class AGENT:
-    def __init__(self,include_car_vars,include_state_vars,eps=0,generation=0):
-        Ninputs = (   len([attr for attr in include_car_vars.keys() if include_car_vars[attr]==True]) # number of 1-dimensional car variables
-                    + np.sum([np.sum(include_car_vars[attr]) for attr in include_car_vars.keys() if isinstance(include_car_vars[attr], list)]) # number of dimensions from higher dimensional car variables
-                    + len([attr for attr in include_state_vars.keys() if include_state_vars[attr]==True]) # number of 1-dimensional state variables
+    def __init__(self,include_state_vars,eps=0,generation=0):
+        Ninputs = ( len([attr for attr in include_state_vars.keys() if include_state_vars[attr]==True]) # number of 1-dimensional state variables
                     + np.sum([np.sum(include_state_vars[attr]) for attr in include_state_vars.keys() if isinstance(include_state_vars[attr], list)]) ) # number of dimensions from higher dimensional state variables
         Nlayers = 4
         Nneurons = np.round(np.linspace(Ninputs+1, 2+1, Nlayers, dtype=int)) # bias term included
@@ -509,16 +497,16 @@ class AGENT:
     #     Nlayers = len(self.neural_network) + 1
     #     Nneurons = np.round(np.linspace(Ninputs+1, 2+1, Nlayers, dtype=int)) # bias term included
     
-    def upgrade(self, include_car_vars_prev, include_state_vars_prev, include_car_vars, include_state_vars):
+    def upgrade(self, include_state_vars_prev, include_state_vars):
         # Upgrade the neural network to include new variables.
         previous_neural_network = self.neural_network
 
         include_booleans_prev = np.array([True], dtype=bool) # bias term included
-        for incl in list(include_car_vars_prev.values()) + list(include_state_vars_prev.values()):
+        for incl in list(include_state_vars_prev.values()):
             include_booleans_prev = np.append(include_booleans_prev, incl)
 
         include_booleans = np.array([True], dtype=bool) # bias term included
-        for incl in list(include_car_vars.values()) + list(include_state_vars.values()):
+        for incl in list(include_state_vars.values()):
             include_booleans = np.append(include_booleans, incl)
         
         Ninputs = np.sum(include_booleans) # bias term included
@@ -534,16 +522,14 @@ class AGENT:
             self.neural_network.append(new_layer)
 
 class RACE:
-    def __init__(self,circuit,car,laps,agents,include_car_vars,include_state_vars,MaxTime,interaction=True):
+    def __init__(self,circuit,cars,laps,agents,include_state_vars,MaxTime):
         self.circuit = circuit
-        self.car = car
+        self.cars = cars
         self.laps = laps
         self.MaxTime = MaxTime
         self.Nagents = len(agents)
-        self.include_car_vars = include_car_vars
         self.include_state_vars = include_state_vars
-        self.interaction = interaction
-        self.state = RACE.STATE(Nagents=self.Nagents, circuit=self.circuit, Nlaps=self.laps, car=self.car)
+        self.state = RACE.STATE(Nagents=self.Nagents, circuit=self.circuit, Nlaps=self.laps, cars=self.cars)
         self.neural_networks = [np.rollaxis(np.dstack([agent.neural_network[layer] for agent in agents]), -1)
                                 for layer in range(len(agents[0].neural_network))] # shape (Nlayers,Nagents,Ncols,Nrows)
         self.remaining_drivers = np.arange(self.Nagents, dtype=int)
@@ -560,7 +546,7 @@ class RACE:
                 p = self.state.position[[aa],:].T # This is a 2*1 column array
                 TN = self.state.car_TN[aa]        # This is a 2*2 array
                 transformation = transforms.Affine2D(matrix=np.block([[TN,p], [0,0,1]]))
-                car_images.append(ax.imshow(self.car.img,
+                car_images.append(ax.imshow(self.cars[self.state.carid[aa]].img,
                                             extent = [-car_size[0]/2, car_size[0]/2, -car_size[1]/2, car_size[1]/2],
                                             transform = transformation + ax.transData,
                                             zorder = zorder))
@@ -596,14 +582,13 @@ class RACE:
         stop = False
         while not(stop):
             # Determine the inputs to the neural networks, i.e. what the agent sees. (one vector for every agent)
-            state = np.column_stack([np.tile([getattr(self.car, attr)[self.include_car_vars[attr]].squeeze() for attr in self.include_car_vars.keys() if not(self.include_car_vars[attr]==False)], (self.Nagents,1))] +
-                                    [getattr(self.state, attr)[:,self.include_state_vars[attr]] for attr in self.include_state_vars.keys() if not(self.include_state_vars[attr]==False)])
+            state = np.column_stack([getattr(self.state, attr)[:,self.include_state_vars[attr]] for attr in self.include_state_vars.keys() if not(self.include_state_vars[attr]==False)])
 
             # The agents determine which action to take
             actions = self.get_actions(state) # shape (Nagents,Nactions)
 
             # Simulate to get the new state
-            self.state.simulate(actions,dt,self.circuit,self.car,self.laps,self.interaction)
+            self.state.simulate(actions,dt,self.circuit,self.cars,self.laps)
 
             if save:
                 draw_cars_and_save_frame()
@@ -615,12 +600,13 @@ class RACE:
                 self.penalty[self.remaining_drivers[np.where(finished)[0]]] = tt*dt
                 self.remove_agents(finished)
             
-            if tt < MaxSteps and self.Nagents > self.Nfinishers:
+            if tt >= MaxSteps or self.Nagents <= self.Nfinishers:
+                stop = True
+                abandoned = np.ones(self.Nagents, dtype=bool)
+            else:
                 abandoned = np.logical_or(np.abs(self.state.position_local[:,1]) > 2*road_width, 
                                           np.logical_and(self.state.health_tank <= 0, np.linalg.norm(self.state.velocity,axis=1)<1e-2))
-            else:
-                abandoned = np.ones(self.Nagents, dtype=bool)
-                stop = True
+
             if np.any(abandoned):
                 self.penalty[self.remaining_drivers[np.where(abandoned)[0]]] = MaxSteps*dt + self.state.distance_to_finish[abandoned]
                 self.remove_agents(abandoned)
@@ -649,16 +635,26 @@ class RACE:
         self.state.remove_agents(mask)
     
     class STATE:
-        def __init__(self,Nagents,circuit,Nlaps,car):
-            if np.shape(circuit.start)[0] == 1:
-                self.position = np.repeat(circuit.start, Nagents, axis=0)     # shape (Nagents,2)
-            else:
-                self.position = circuit.start                                 # shape (Nagents,2)
+        def __init__(self,Nagents,circuit,Nlaps,cars):
+            Ncars = len(cars)
+            Nraces = Nagents // Ncars
+            self.raceid = np.repeat(np.arange(Nraces, dtype=int), Ncars)  # shape Nagents
+            self.carid = np.tile(np.arange(Ncars, dtype=int), Nraces)     # shape Nagents
+            
+            self.car_grip = np.asarray([cars[self.carid[aa]].grip for aa in range(Nagents)]) # shape Nagents
+            self.car_roll_resistance_coef = np.asarray([cars[self.carid[aa]].roll_resistance_coef for aa in range(Nagents)]) # shape Nagents
+            self.car_max_acceleration = np.asarray([cars[self.carid[aa]].max_acceleration for aa in range(Nagents)]) # shape Nagents
+            self.car_max_deceleration = np.asarray([cars[self.carid[aa]].max_deceleration for aa in range(Nagents)]) # shape Nagents
+            self.car_engine_efficiency = np.asarray([cars[self.carid[aa]].engine_efficiency for aa in range(Nagents)]) # shape Nagents
+            self.car_tyre_max_dist = np.asarray([cars[self.carid[aa]].tyre_max_dist for aa in range(Nagents)]) # shape Nagents
+            self.car_air_resistance_coef = np.asarray([cars[self.carid[aa]].air_resistance_coef for aa in range(Nagents)]) # shape Nagents
+
+            self.position = circuit.destination[0] + (-.9 * circuit.length[0] + self.carid * 2*car_size[0])[:,np.newaxis] * circuit.TN[np.newaxis,0,:,0] # shape (Nagents,2)
             self.velocity = np.zeros((Nagents, 2))                            # shape (Nagents,2)
             self.orientation = np.repeat(circuit.orientation[0], Nagents)     # shape Nagents
             self.car_TN = get_TN_from_angle(self.orientation)                 # shape (Nagents,2,2)
             self.omega = np.zeros(Nagents)                                    # shape Nagents
-            self.health_tank = np.repeat(car.tank, Nagents)                   # shape Nagents
+            self.health_tank = np.asarray([cars[self.carid[aa]].tank for aa in range(Nagents)]) # shape Nagents
             self.tyres_deterioration = np.zeros(Nagents)                      # shape Nagents
 
             # Counters
@@ -732,27 +728,28 @@ class RACE:
                 any_change = False
             return any_change
 
-        def simulate(self,actions,dt,circuit,car,Nlaps,interaction):
+        def simulate(self,actions,dt,circuit,cars,Nlaps):
             ### Derive the forces exerted by the road ###
             # Determine whether wheels are on road or grass
             car_Normal_local = np.matmul(np.transpose(self.TN_local,(0,2,1)), self.car_TN[:,:,1,np.newaxis]).squeeze(axis=2) # shape (Nagents,2)
                 # car_TN_local = TN_local.transpose() @ car_TN
                 # car_Normal_local = TN_local.transpose() @ car_Normal
-            wheels_Npos_local = self.position_local[:,np.newaxis,1] + np.tensordot(car_Normal_local[:,np.newaxis,:], wheel_rvectors[np.newaxis,:,:], axes=(2,2)).squeeze(axis=(1,2)) #shape (Nagents,Nwheels)
+            wheels_Npos_local = self.position_local[:,np.newaxis,1] + np.tensordot(car_Normal_local[:,np.newaxis,:], wheel_rvectors[np.newaxis,:,:], axes=(2,2)).squeeze(axis=(1,2)) # shape (Nagents,Nwheels)
                 # wheels_Npos_local = position_local[1] + np.dot(car_Normal_local, wheel_rvector)
             
-            mask_offroad = np.abs(wheels_Npos_local) > road_width/2 #shape (Nagents,Nwheels)
-            grip = np.repeat(car.grip / (1+self.tyres_deterioration[:,np.newaxis]**2), 4, axis=1) #shape (Nagents,Nwheels)
+            mask_offroad = np.abs(wheels_Npos_local) > road_width/2 # shape (Nagents,Nwheels)
+            grip = np.repeat((self.car_grip / (1+self.tyres_deterioration**2))[:,np.newaxis], 4, axis=1) # shape (Nagents,Nwheels)
             grip[mask_offroad] *= offroad_grip_multiplyer
-            roll_resistance_coef = np.where(mask_offroad, car.roll_resistance_coef * offroad_roll_resistance_multiplyer, car.roll_resistance_coef)
+            roll_resistance_coef = np.repeat(self.car_roll_resistance_coef[:,np.newaxis], 4, axis=1) # shape (Nagents,Nwheels)
+            roll_resistance_coef[mask_offroad] *= offroad_roll_resistance_multiplyer
 
             # Determine the desired tangential acceleration and the fuel usage
             action_acceleration = actions[:,0]
             action_acceleration[self.health_tank<=0] = 0 # No more acceleration when tank is empty
             positive_acceleration = action_acceleration > 0
-            acceleration_linear = np.where(positive_acceleration, action_acceleration * car.max_acceleration, 
-                                                                  action_acceleration * car.max_deceleration)
-            efficiency = np.maximum(1e-3, np.where(positive_acceleration, car.engine_efficiency * (1-np.exp(action_acceleration-1)) / (1-np.exp(-1)), np.inf))
+            acceleration_linear = np.where(positive_acceleration, action_acceleration * self.car_max_acceleration, 
+                                                                  action_acceleration * self.car_max_deceleration)
+            efficiency = np.maximum(1e-2, np.where(positive_acceleration, self.car_engine_efficiency * (1-np.exp(action_acceleration-1)) / (1-np.exp(-1)), np.inf))
                 # efficiency = base_efficiency * (1 - exp(acceleration / max_acceleration))
             self.health_tank -= acceleration_linear * np.linalg.norm(self.velocity,axis=1) / efficiency * dt / tank_unit
                 # Energy consumption = int(F*v)*dt
@@ -782,7 +779,7 @@ class RACE:
             acc_norm = np.linalg.norm(acceleration_surface,axis=-1) # shape (Nagents,Nwheels)
             drift = acc_norm > grip
             acceleration_surface[drift, :] *= (grip[drift, np.newaxis]*drift_grip_multiplyer / acc_norm[drift, np.newaxis])
-            self.tyres_deterioration -= dt / car.tyre_max_dist * np.mean(wheel_velocity[:,:,0] * (1+drift*drift_deterioration_multiplyer), axis=1)
+            self.tyres_deterioration -= dt / self.car_tyre_max_dist * np.mean(wheel_velocity[:,:,0] * (1+drift*drift_deterioration_multiplyer), axis=1)
 
             # Prevent driving backwards
             acceleration_surface[:,:,0] = np.maximum(acceleration_surface[:,:,0], -wheel_velocity[:,:,0]/dt)
@@ -803,9 +800,9 @@ class RACE:
             ### Add air resistance ###
             acceleration_surface = np.matmul(self.car_TN, acceleration_surface_eq[:,:,np.newaxis]).squeeze(axis=2) # shape (Nagents,2)
                 # Conversion to global frame
-            acceleration = acceleration_surface - car.air_resistance_coef * np.linalg.norm(self.velocity,axis=1)[:,np.newaxis] * self.velocity # shape (Nagents,2)
+            acceleration = acceleration_surface - self.car_air_resistance_coef[:,np.newaxis] * np.linalg.norm(self.velocity,axis=1)[:,np.newaxis] * self.velocity # shape (Nagents,2)
 
-            if interaction:
+            if len(cars) > 1:
                 copy_position = np.array(self.position)
                 copy_velocity = np.array(self.velocity)
                 copy_orientation = np.array(self.orientation)
@@ -823,34 +820,42 @@ class RACE:
             self.orientation += dt/2 * self.omega
 
             ### Check for colisions ###
-            if interaction:
-                in_range = np.linalg.norm(self.position[:,np.newaxis,:] - self.position[np.newaxis,:,:], axis=2) < np.linalg.norm(car_size)
-                IDX1, IDX2 = np.where(np.triu(in_range, k=1))
-                for idx1, idx2 in zip(IDX1, IDX2):
-                    #get the positions of the wheels of both cars
-                    wheels_pos = self.position[[idx1,idx2],np.newaxis,:] + np.matmul(self.car_TN[[idx1,idx2],np.newaxis,:,:], wheel_rvectors[np.newaxis,:,:,np.newaxis]).squeeze() # shape (2,Nwheels,2)
-                    #check whether colision occurs
-                    wheels_car1_in_frame_car2 = to_frame(wheels_pos[0,:,:].squeeze()-self.position[idx2],self.car_TN[idx2]) # The coordinates of the wheels of car 1 in the frame of car 2
-                    wheels_car2_in_frame_car1 = to_frame(wheels_pos[1,:,:].squeeze()-self.position[idx1],self.car_TN[idx1]) # The coordinates of the wheels of car 2 in the frame of car 1
-                    intersect1 = np.all(np.abs(wheels_car1_in_frame_car2) - car_size/2 <= 0, axis=1)
-                    intersect2 = np.all(np.abs(wheels_car2_in_frame_car1) - car_size/2 <= 0, axis=1)
-                    if ~np.any(intersect1) and ~np.any(intersect2):
-                        #no colision occurs
-                        continue
-                    #find the point of colision
-                    r_hit = np.mean(np.concatenate((wheels_pos[0,intersect1,:], wheels_pos[1,intersect2,:]), axis=0), axis=0).squeeze()
-                    velocity_r_hit1 = self.velocity[idx1,:] + self.omega[idx1] * np.asarray([[0,-1],[1,0]]) @ (r_hit-self.position[idx1])
-                    velocity_r_hit2 = self.velocity[idx2,:] + self.omega[idx2] * np.asarray([[0,-1],[1,0]]) @ (r_hit-self.position[idx2])
-                    rvector1 = to_frame(r_hit-self.position[idx1], self.car_TN[idx1])
-                    rvector2 = to_frame(r_hit-self.position[idx2], self.car_TN[idx2])
+            if len(cars) > 1:
+                any_colision = False
+                for racenum in np.unique(self.raceid):
+                    mask = self.raceid == racenum
+                    in_range = np.linalg.norm(self.position[mask,np.newaxis,:] - self.position[np.newaxis,mask,:], axis=2) < np.linalg.norm(car_size)
+                    IDX1, IDX2 = np.where(np.triu(in_range, k=1))
+                    IDX1 = np.where(mask)[0][IDX1]
+                    IDX2 = np.where(mask)[0][IDX2]
+                    for idx1, idx2 in zip(IDX1, IDX2):
+                        #get the positions of the wheels of both cars
+                        wheels_pos = self.position[[idx1,idx2],np.newaxis,:] + np.matmul(self.car_TN[[idx1,idx2],np.newaxis,:,:], wheel_rvectors[np.newaxis,:,:,np.newaxis]).squeeze() # shape (2,Nwheels,2)
+                        #check whether colision occurs
+                        wheels_car1_in_frame_car2 = to_frame(wheels_pos[0,:,:].squeeze()-self.position[idx2],self.car_TN[idx2]) # The coordinates of the wheels of car 1 in the frame of car 2
+                        wheels_car2_in_frame_car1 = to_frame(wheels_pos[1,:,:].squeeze()-self.position[idx1],self.car_TN[idx1]) # The coordinates of the wheels of car 2 in the frame of car 1
+                        intersect1 = np.all(np.abs(wheels_car1_in_frame_car2) - car_size/2 <= 0, axis=1)
+                        intersect2 = np.all(np.abs(wheels_car2_in_frame_car1) - car_size/2 <= 0, axis=1)
+                        if ~np.any(intersect1) and ~np.any(intersect2):
+                            #no colision occurs
+                            continue
+                        any_colision = True
+                        
+                        #find the point of colision
+                        r_hit = np.mean(np.concatenate((wheels_pos[0,intersect1,:], wheels_pos[1,intersect2,:]), axis=0), axis=0).squeeze()
+                        velocity_r_hit1 = self.velocity[idx1,:] + self.omega[idx1] * np.asarray([[0,-1],[1,0]]) @ (r_hit-self.position[idx1])
+                        velocity_r_hit2 = self.velocity[idx2,:] + self.omega[idx2] * np.asarray([[0,-1],[1,0]]) @ (r_hit-self.position[idx2])
+                        rvector1 = to_frame(r_hit-self.position[idx1], self.car_TN[idx1])
+                        rvector2 = to_frame(r_hit-self.position[idx2], self.car_TN[idx2])
 
-                    # Add force to both cars
-                    force = -(velocity_r_hit1-velocity_r_hit2) / dt # exerted on car1
-                    acceleration[idx1] += force
-                    torque_per_mass[idx1] += (rvector1[0] * force[1] - rvector1[1] * force[0])
-                    acceleration[idx2] -= force
-                    torque_per_mass[idx2] -= (rvector2[0] * force[1] - rvector2[1] * force[0])
+                        # Add force to both cars
+                        force = -(velocity_r_hit1-velocity_r_hit2) / dt # exerted on car1
+                        acceleration[idx1] += force
+                        torque_per_mass[idx1] += (rvector1[0] * force[1] - rvector1[1] * force[0])
+                        acceleration[idx2] -= force
+                        torque_per_mass[idx2] -= (rvector2[0] * force[1] - rvector2[1] * force[0])
 
+                if any_colision:
                     #undo integration scheme
                     self.position = copy_position
                     self.velocity = copy_velocity
@@ -887,7 +892,7 @@ wheel_rvectors = np.array([ [ car_size[0], car_size[1]], #front left wheel
                             [ car_size[0],-car_size[1]], #front right wheel
                             [-car_size[0], car_size[1]], #back left wheel
                             [-car_size[0],-car_size[1]]  #back right wheel
-                            ]) /2                        #shape (4,2)
+                            ]) /2                        # shape (4,2)
 
 # Physical parameters
 dt = 1/4 #[s]

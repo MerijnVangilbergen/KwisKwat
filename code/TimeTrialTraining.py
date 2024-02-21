@@ -4,9 +4,6 @@ from datetime import datetime
 import copy
 from utils import *
 
-# Select folders
-output_folder = '../output'
-
 survival_rate = .2
 eps = 1
 Nraces = 20
@@ -21,21 +18,17 @@ Nagents = 5000
 # agents = [AGENT(include_car_vars,include_state_vars, eps=eps) for dummy in range(Nagents)]
 
 # Start from previously trained agents
-with open('../output/20240218_2252_gen300', 'rb') as f:
+with open('../output/20240218_2252_gen300_updated', 'rb') as f:
     print('Loading agents')
-    include_car_vars = pickle.load(f)
     include_state_vars = pickle.load(f)
     agents = pickle.load(f)
-    print(include_car_vars)
     print(include_state_vars)
 
 # # print('Upgrading agents')
-# include_car_vars_prev = include_car_vars
 # include_state_vars_prev = include_state_vars
-# include_car_vars = {'engine_efficiency': True, 'max_acceleration': True, 'max_deceleration': True, 'tank': False, 'grip': True, 'tyre_max_dist': False, 'roll_resistance_coef': True, 'air_resistance_coef': True}
 # include_state_vars = {'health_tank': True, 'tyres_deterioration': True, 'distance_to_finish': False, 'position_local': [True,True], 'velocity_local': [True,True], 'orientation_local': True, 'omega': True, 'length_future': [True,False,False], 'curvature_future': [True,True,False,False]}
 # for agent in agents:
-#     agent.upgrade(include_car_vars_prev, include_state_vars_prev, include_car_vars, include_state_vars)
+#     agent.upgrade(include_state_vars_prev, include_state_vars)
 
 
 generation = 300
@@ -68,19 +61,18 @@ while True:
             try:
                 Nsegments = np.random.randint(Nsegments_min, Nsegments_max)
                 car = CAR(np.random.uniform(0,1,8), color='red')
-                circuit = CIRCUIT(circuit_diagonal=np.random.uniform(200,350), N=Nsegments, start_coordinate=np.random.uniform(0,-1), start_coordinate2=np.random.uniform(-.5,.5))
-                race = RACE(circuit=circuit,car=car,laps=1,agents=agents,include_car_vars=include_car_vars,include_state_vars=include_state_vars,MaxTime=10*min(generation,60),interaction=False)
+                circuit = CIRCUIT(circuit_diagonal=np.random.uniform(200,350), N=Nsegments)
+                race = RACE(circuit=circuit,cars=[car],laps=1,agents=agents,include_state_vars=include_state_vars,MaxTime=10*min(generation,60))
 
                 save = (generation%25 == 0 and racenum == 0)
                 if save:
                     current_datetime = datetime.now()
                     date_string = current_datetime.strftime("%Y%m%d_%H%M")
                     filename = date_string + '_gen' + str(generation)
-                    with open(output_folder+'/'+filename, 'wb') as f:
-                        pickle.dump(include_car_vars, f)
+                    with open('../output/'+filename, 'wb') as f:
                         pickle.dump(include_state_vars, f)
                         pickle.dump(agents, f)
-                    race.simulate(saveas=output_folder+'/'+filename+'.mp4')
+                    race.simulate(saveas='../output/'+filename+'.mp4')
                 else:
                     race.simulate()
                 break

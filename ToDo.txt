@@ -1,2 +1,1 @@
-Add raceid and carid to each agent in a race
 Program oponent inputs to neural network
