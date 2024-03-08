@@ -32,7 +32,6 @@ with open('../output/20240218_2252_gen300_updated', 'rb') as f:
 
 
 generation = 300
-Nfinishers = 0
 
 while True:
     generation += 1
@@ -44,24 +43,24 @@ while True:
     elif Nage1 < (1-survival_rate)/4 and eps > .01:
         eps *= .9
 
-    print(f"gen={generation}, Nfinishers={Nfinishers}, Nage1={Nage1}, eps={eps}")
+    print(f"gen={generation}, Nage1={Nage1}, eps={eps}")
 
     # Create offspring
+    agents_prev = copy.deepcopy(agents)
     while len(agents) < Nagents:
-        new_agents = copy.deepcopy(agents)
+        new_agents = copy.deepcopy(agents_prev)
         for agent in new_agents:
             agent.mutate(eps, generation=generation)
         agents = agents + new_agents
 
     # Simulate races
     penalties = np.zeros(len(agents))
-    Nfinishers = 0
     for racenum in range(Nraces):
         while True:
             try:
-                Nsegments = np.random.randint(Nsegments_min, Nsegments_max)
                 car = CAR(np.random.uniform(0,1,8), color='red')
-                circuit = CIRCUIT(circuit_diagonal=np.random.uniform(200,350), N=Nsegments)
+                circuit = CIRCUIT(circuit_diagonal=np.random.uniform(200,350), 
+                                  Nsegments=np.random.randint(Nsegments_min, Nsegments_max))
                 race = RACE(circuit=circuit,cars=[car],laps=1,agents=agents,include_state_vars=include_state_vars,MaxTime=10*min(generation,60))
 
                 save = (generation%25 == 0 and racenum == 0)
@@ -80,9 +79,7 @@ while True:
                 print('An error occurred. Trying again.')
                 continue
 
-        penalties += race.penalty
-        Nfinishers += race.Nfinishers
-    Nfinishers /= Nraces
+        penalties += (race.time_elapsed + race.distance_left)
 
     # Keep the best agents
     agents = [agents[idx] for idx in np.argsort(penalties)[:int(survival_rate*Nagents)]]
